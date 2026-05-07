@@ -164,10 +164,14 @@ def run_dataset(dataset: str, sample: int, num_queries: int,
 
     # --- query for each (mode, rewriter) ---
     runs: list[ModeRun] = []
+    label_w = max(
+        len(m if r == "none" else f"{m}+{r}")
+        for m in modes for r in rewriters
+    )
     for mode in modes:
         for rewriter in rewriters:
             label = mode if rewriter == "none" else f"{mode}+{rewriter}"
-            print(f"    [query/{label:<18}] num_queries={num_queries} …", end=" ", flush=True)
+            print(f"    [query/{label:<{label_w}}] num_queries={num_queries} …", end=" ", flush=True)
             stage, qout, run = run_stage(
                 f"query-{label}",
                 lambda m=mode, r=rewriter: query_mod.query(

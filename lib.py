@@ -248,8 +248,9 @@ def print_dataset_list() -> None:
         print(f"  {name:<{width + 2}} {info['description']}")
     print()
     print("  Usage:")
-    print("    python3 ingest.py <dataset>")
-    print("    python3 query.py  <dataset> [--num-queries N]")
+    print("    python3 ingest.py <dataset> [--sample N]")
+    print("    python3 query.py  <dataset> [--mode vector|text|hybrid] "
+          "[--rewriter none|hyde|multi|decompose] [--num-queries N]")
     print()
 
 
