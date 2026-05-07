@@ -37,8 +37,10 @@ from lib_metrics import (
 )
 from retrieve import MODES, retrieve, multi_query_retrieve
 from query_rewriter import REWRITERS, DEFAULT_REWRITER, rewrite
+from rerank import rerank as rerank_rows
 
-DEFAULT_MODE = "hybrid"
+DEFAULT_MODE       = "hybrid"
+RERANK_CANDIDATES  = 50   # how many candidates to fetch from first-stage when reranking
 
 
 @dataclass
@@ -55,6 +57,7 @@ class RunResult:
     dataset: str
     mode: str
     rewriter: str
+    rerank: bool
     num_queries: int
     chunks_in_collection: int
     per_query: list[QueryResult]
@@ -82,6 +85,7 @@ def query(
     num_queries: int = DEFAULT_QUERIES,
     mode: str = DEFAULT_MODE,
     rewriter: str = DEFAULT_REWRITER,
+    rerank: bool = False,
     verbose: bool = True,
 ) -> RunResult:
     """
@@ -101,9 +105,11 @@ def query(
     coll_name = collection_name(dataset)
 
     if verbose:
-        header(f"Query  ×  {dataset}  ×  mode={mode}  ×  rewriter={rewriter}")
+        header(f"Query  ×  {dataset}  ×  mode={mode}  ×  rewriter={rewriter}"
+               + ("  ×  +rerank" if rerank else ""))
         print(f"  Doc embedding   : {MODEL}")
         print(f"  Query embedding : {QUERY_MODEL}")
+        print(f"  Reranker        : {'rerank-2.5' if rerank else 'off'}")
         print(f"  Collection      : {DB_NAME}.{coll_name}")
 
     mongo = pymongo.MongoClient(MONGODB_URI)
@@ -154,6 +160,9 @@ def query(
 
     per_query: list[QueryResult] = []
     top_n = max(METRIC_KS)
+    # When reranking, fetch a deeper candidate pool from first-stage retrieval
+    # so the cross-encoder has room to reorder useful misses up.
+    first_stage_k = RERANK_CANDIDATES if rerank else top_n
 
     for qid, original_text, sub_texts, sub_vecs in zip(
         chosen_qids, raw_query_texts, rewrites_per_query, vecs_per_query
@@ -162,8 +171,13 @@ def query(
         relevant_set = {did for did, s in qrel.items() if s > 0}
 
         sub_queries = list(zip(sub_vecs, sub_texts))
-        ranked_rows = multi_query_retrieve(mode, coll, sub_queries, top_k=top_n)
-        ranked_ids  = [r["doc_id"] for r in ranked_rows]
+        ranked_rows = multi_query_retrieve(mode, coll, sub_queries, top_k=first_stage_k)
+
+        if rerank and ranked_rows:
+            # Cross-encode against the original (un-rewritten) query for fairness
+            ranked_rows = rerank_rows(original_text, ranked_rows, top_k=top_n)
+
+        ranked_ids = [r["doc_id"] for r in ranked_rows]
 
         metrics = compute_query_metrics(ranked_ids, qrel)
 
@@ -202,6 +216,7 @@ def query(
         dataset=dataset,
         mode=mode,
         rewriter=rewriter,
+        rerank=rerank,
         num_queries=len(chosen_qids),
         chunks_in_collection=count,
         per_query=per_query,
@@ -223,6 +238,8 @@ def main() -> None:
     p.add_argument("--rewriter", choices=REWRITERS, default=DEFAULT_REWRITER,
                    help=f"query rewriter (default: {DEFAULT_REWRITER}; "
                         "anything other than 'none' requires OPENAI_API_KEY)")
+    p.add_argument("--rerank", action="store_true",
+                   help="apply Voyage rerank-2.5 cross-encoder as a second stage")
     p.add_argument("--num-queries", type=int, default=DEFAULT_QUERIES,
                    help=f"how many queries to run (default: {DEFAULT_QUERIES})")
     args = p.parse_args()
@@ -234,7 +251,7 @@ def main() -> None:
         p.error("dataset is required (or pass --list to see supported datasets)")
 
     query(args.dataset, num_queries=args.num_queries,
-          mode=args.mode, rewriter=args.rewriter)
+          mode=args.mode, rewriter=args.rewriter, rerank=args.rerank)
 
 
 if __name__ == "__main__":

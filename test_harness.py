@@ -65,13 +65,19 @@ class StageResult:
 class ModeRun:
     mode: str
     rewriter: str
+    rerank: bool
     stage: StageResult
     metrics: dict[str, float] = field(default_factory=dict)
 
     @property
     def label(self) -> str:
-        """Display label like 'hybrid' or 'hybrid+hyde'."""
-        return self.mode if self.rewriter == "none" else f"{self.mode}+{self.rewriter}"
+        """Display label like 'hybrid', 'hybrid+hyde', 'hybrid+rerank'."""
+        parts = [self.mode]
+        if self.rewriter != "none":
+            parts.append(self.rewriter)
+        if self.rerank:
+            parts.append("rerank")
+        return "+".join(parts)
 
 
 @dataclass
@@ -81,9 +87,9 @@ class DatasetResult:
     chunks_in_collection: int = 0
     runs: list[ModeRun] = field(default_factory=list)
 
-    def find(self, mode: str, rewriter: str) -> ModeRun | None:
+    def find(self, mode: str, rewriter: str, rerank: bool = False) -> ModeRun | None:
         for r in self.runs:
-            if r.mode == mode and r.rewriter == rewriter:
+            if r.mode == mode and r.rewriter == rewriter and r.rerank == rerank:
                 return r
         return None
 
@@ -137,7 +143,8 @@ def verify_collection(dataset: str) -> tuple[int, bool, str]:
 
 
 def run_dataset(dataset: str, sample: int, num_queries: int,
-                modes: list[str], rewriters: list[str], verbose: bool) -> DatasetResult:
+                modes: list[str], rewriters: list[str], reranks: list[bool],
+                verbose: bool) -> DatasetResult:
     print(f"\n  ── {dataset} ────────────────────────────────────────────")
 
     # --- ingest ---
@@ -162,37 +169,50 @@ def run_dataset(dataset: str, sample: int, num_queries: int,
                              chunks_in_collection=chunks)
     print(f"      ↳ {chunks:,} chunks; vector + text indexes ready")
 
-    # --- query for each (mode, rewriter) ---
+    # --- query for each (mode, rewriter, rerank) ---
     runs: list[ModeRun] = []
-    label_w = max(
-        len(m if r == "none" else f"{m}+{r}")
-        for m in modes for r in rewriters
-    )
+
+    def _label(m: str, r: str, rk: bool) -> str:
+        parts = [m]
+        if r != "none":
+            parts.append(r)
+        if rk:
+            parts.append("rerank")
+        return "+".join(parts)
+
+    label_w = max(len(_label(m, r, rk)) for m in modes for r in rewriters for rk in reranks)
+
     for mode in modes:
         for rewriter in rewriters:
-            label = mode if rewriter == "none" else f"{mode}+{rewriter}"
-            print(f"    [query/{label:<{label_w}}] num_queries={num_queries} …", end=" ", flush=True)
-            stage, qout, run = run_stage(
-                f"query-{label}",
-                lambda m=mode, r=rewriter: query_mod.query(
-                    dataset, num_queries=num_queries, mode=m, rewriter=r, verbose=False,
-                ),
-            )
-            metrics = run.aggregate if run is not None else {}
-            ndcg10  = metrics.get("NDCG@10", 0.0)
-            map_s   = metrics.get("MAP", 0.0)
-            print(f"{stage.duration_s:.1f}s "
-                  f"{'PASS' if stage.passed else 'FAIL'}  "
-                  f"NDCG@10={ndcg10:.3f}  MAP={map_s:.3f}")
-            if not stage.passed:
-                print(f"      ↳ {stage.detail}")
-                if verbose:
-                    print(qout)
-            elif metrics and ndcg10 == 0.0 and map_s == 0.0:
-                stage.passed = False
-                stage.detail = "all metrics zero — no relevant docs retrieved"
-                print(f"      ↳ {stage.detail}")
-            runs.append(ModeRun(mode=mode, rewriter=rewriter, stage=stage, metrics=metrics))
+            for rk in reranks:
+                label = _label(mode, rewriter, rk)
+                print(f"    [query/{label:<{label_w}}] num_queries={num_queries} …",
+                      end=" ", flush=True)
+                stage, qout, run = run_stage(
+                    f"query-{label}",
+                    lambda m=mode, r=rewriter, do_rerank=rk: query_mod.query(
+                        dataset, num_queries=num_queries,
+                        mode=m, rewriter=r, rerank=do_rerank, verbose=False,
+                    ),
+                )
+                metrics = run.aggregate if run is not None else {}
+                ndcg10  = metrics.get("NDCG@10", 0.0)
+                map_s   = metrics.get("MAP", 0.0)
+                print(f"{stage.duration_s:.1f}s "
+                      f"{'PASS' if stage.passed else 'FAIL'}  "
+                      f"NDCG@10={ndcg10:.3f}  MAP={map_s:.3f}")
+                if not stage.passed:
+                    print(f"      ↳ {stage.detail}")
+                    if verbose:
+                        print(qout)
+                elif metrics and ndcg10 == 0.0 and map_s == 0.0:
+                    stage.passed = False
+                    stage.detail = "all metrics zero — no relevant docs retrieved"
+                    print(f"      ↳ {stage.detail}")
+                runs.append(ModeRun(
+                    mode=mode, rewriter=rewriter, rerank=rk,
+                    stage=stage, metrics=metrics,
+                ))
 
     return DatasetResult(
         dataset=dataset, ingest=ingest_result,
@@ -222,23 +242,30 @@ def _bar_glyph(value: float, glyph: str, width: int = 24, vmax: float = 1.0) -> 
     return (glyph * int(fill)).ljust(width)
 
 
-def _strategies(modes: list[str], rewriters: list[str]) -> list[tuple[str, str]]:
-    """Cartesian product (mode, rewriter), preserving caller order."""
-    return [(m, r) for m in modes for r in rewriters]
+def _strategies(modes: list[str], rewriters: list[str],
+                reranks: list[bool]) -> list[tuple[str, str, bool]]:
+    """Cartesian product (mode, rewriter, rerank), preserving caller order."""
+    return [(m, r, rk) for m in modes for r in rewriters for rk in reranks]
 
 
-def _strategy_label(mode: str, rewriter: str) -> str:
-    return mode if rewriter == "none" else f"{mode}+{rewriter}"
+def _strategy_label(mode: str, rewriter: str, rerank: bool = False) -> str:
+    parts = [mode]
+    if rewriter != "none":
+        parts.append(rewriter)
+    if rerank:
+        parts.append("rerank")
+    return "+".join(parts)
 
 
-def print_summary(results: list[DatasetResult], modes: list[str], rewriters: list[str]) -> None:
+def print_summary(results: list[DatasetResult],
+                  modes: list[str], rewriters: list[str], reranks: list[bool]) -> None:
     print()
     print("═" * 110)
     print("  Test Harness Summary")
     print("═" * 110)
     print()
     cols = ["P@5", "R@5", "NDCG@5", "NDCG@10", "MRR", "MAP"]
-    strats = _strategies(modes, rewriters)
+    strats = _strategies(modes, rewriters, reranks)
     label_w = max(len(_strategy_label(*s)) for s in strats)
 
     print(f"  {'Dataset':<14} {'Strategy':<{label_w}} {'Query':>7} "
@@ -251,10 +278,10 @@ def print_summary(results: list[DatasetResult], modes: list[str], rewriters: lis
     pass_count = 0
     total      = 0
     for r in results:
-        for mode, rewriter in strats:
-            mr = r.find(mode, rewriter)
+        for mode, rewriter, rerank in strats:
+            mr = r.find(mode, rewriter, rerank)
             total += 1
-            label = _strategy_label(mode, rewriter)
+            label = _strategy_label(mode, rewriter, rerank)
             if not mr:
                 print(f"  {r.dataset:<14} {label:<{label_w}} {'-':>7} "
                       + " ".join(f"{'-':>8}" for _ in cols)
@@ -275,13 +302,14 @@ def print_summary(results: list[DatasetResult], modes: list[str], rewriters: lis
 
 
 def print_comparison_charts(results: list[DatasetResult],
-                            modes: list[str], rewriters: list[str]) -> None:
-    """Per-metric bar chart with one bar per (mode × rewriter), grouped by dataset."""
+                            modes: list[str], rewriters: list[str],
+                            reranks: list[bool]) -> None:
+    """Per-metric bar chart with one bar per (mode × rewriter × rerank), grouped by dataset."""
     passed = [r for r in results if r.runs]
     if not passed:
         return
 
-    strats   = _strategies(modes, rewriters)
+    strats   = _strategies(modes, rewriters, reranks)
     glyphs   = {s: GLYPH_PALETTE[i % len(GLYPH_PALETTE)] for i, s in enumerate(strats)}
     label_w  = max(len(_strategy_label(*s)) for s in strats)
     name_w   = max(len(r.dataset) for r in passed)
@@ -297,11 +325,11 @@ def print_comparison_charts(results: list[DatasetResult],
         print(f"  {metric}")
         print(f"  {'─' * (name_w + label_w + 36)}")
         for r in passed:
-            for i, (mode, rewriter) in enumerate(strats):
-                mr = r.find(mode, rewriter)
+            for i, s in enumerate(strats):
+                mr = r.find(*s)
                 v = mr.metrics.get(metric, 0.0) if mr and mr.stage.passed else 0.0
-                glyph = glyphs[(mode, rewriter)]
-                label = _strategy_label(mode, rewriter)
+                glyph = glyphs[s]
+                label = _strategy_label(*s)
                 ds_label = r.dataset if i == 0 else ""
                 print(f"  {ds_label:<{name_w}}  {label:<{label_w}}  "
                       f"{_bar_glyph(v, glyph, width=24, vmax=1.0)}  {v:.3f}")
@@ -309,18 +337,17 @@ def print_comparison_charts(results: list[DatasetResult],
     print()
 
 
-def print_deltas(results: list[DatasetResult], baseline: tuple[str, str] = ("vector", "none")) -> None:
-    """Per-dataset table: NDCG@10 / MAP delta vs baseline (mode, rewriter)."""
-    base_mode, base_rewriter = baseline
-    relevant = [r for r in results if r.find(base_mode, base_rewriter)]
+def print_deltas(results: list[DatasetResult],
+                 baseline: tuple[str, str, bool] = ("vector", "none", False)) -> None:
+    """Per-dataset table: NDCG@10 / MAP delta vs baseline (mode, rewriter, rerank)."""
+    relevant = [r for r in results if r.find(*baseline)]
     if not relevant:
         return
 
-    # All strategies actually present in the runs, minus the baseline
-    seen_strats: list[tuple[str, str]] = []
+    seen_strats: list[tuple[str, str, bool]] = []
     for r in relevant:
         for run in r.runs:
-            s = (run.mode, run.rewriter)
+            s = (run.mode, run.rewriter, run.rerank)
             if s != baseline and s not in seen_strats:
                 seen_strats.append(s)
     if not seen_strats:
@@ -364,9 +391,10 @@ def print_deltas(results: list[DatasetResult], baseline: tuple[str, str] = ("vec
 # ── Markdown report ──────────────────────────────────────────────────────────
 
 def write_markdown_report(results: list[DatasetResult],
-                          modes: list[str], rewriters: list[str], path: str) -> None:
+                          modes: list[str], rewriters: list[str],
+                          reranks: list[bool], path: str) -> None:
     cols = ["P@5", "R@5", "NDCG@5", "NDCG@10", "MRR", "MAP"]
-    strats = _strategies(modes, rewriters)
+    strats = _strategies(modes, rewriters, reranks)
     strat_labels = [_strategy_label(*s) for s in strats]
 
     lines = [
@@ -376,6 +404,7 @@ def write_markdown_report(results: list[DatasetResult],
         "",
         f"- Modes: **{', '.join(modes)}**",
         f"- Rewriters: **{', '.join(rewriters)}**",
+        f"- Rerank: **{', '.join('on' if rk else 'off' for rk in reranks)}**",
         "",
     ]
 
@@ -386,8 +415,8 @@ def write_markdown_report(results: list[DatasetResult],
         lines.append("|---|" + "|".join(["---"] * len(strats)) + "|")
         for r in results:
             cells = []
-            for mode, rewriter in strats:
-                mr = r.find(mode, rewriter)
+            for s in strats:
+                mr = r.find(*s)
                 cells.append(f"{mr.metrics.get(metric, 0.0):.3f}" if mr else "-")
             lines.append(f"| {r.dataset} | " + " | ".join(cells) + " |")
         lines.append("")
@@ -397,12 +426,12 @@ def write_markdown_report(results: list[DatasetResult],
     lines.append("| Dataset | Strategy | " + " | ".join(cols) + " |")
     lines.append("|---|---|" + "|".join(["---"] * len(cols)) + "|")
     for r in results:
-        for mode, rewriter in strats:
-            mr = r.find(mode, rewriter)
+        for s in strats:
+            mr = r.find(*s)
             if not mr:
                 continue
             cells = [f"{mr.metrics.get(c, 0.0):.3f}" for c in cols]
-            lines.append(f"| {r.dataset} | {_strategy_label(mode, rewriter)} | "
+            lines.append(f"| {r.dataset} | {_strategy_label(*s)} | "
                          + " | ".join(cells) + " |")
     lines.append("")
 
@@ -424,6 +453,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--rewriters", nargs="+", choices=list(REWRITERS), default=["none"],
                    help="query rewriters to compare (default: none). "
                         "Anything other than 'none' requires OPENAI_API_KEY.")
+    p.add_argument("--rerank", choices=["off", "on", "both"], default="off",
+                   help="apply Voyage rerank-2.5 cross-encoder. "
+                        "'both' compares with-and-without (default: off).")
     p.add_argument("--sample", type=int, default=200,
                    help="docs to ingest per dataset (default: 200)")
     p.add_argument("--num-queries", type=int, default=3,
@@ -445,32 +477,35 @@ def main() -> None:
     else:
         datasets = list(DATASETS.keys())
 
-    n_combos = len(datasets) * len(args.modes) * len(args.rewriters)
+    reranks = {"off": [False], "on": [True], "both": [False, True]}[args.rerank]
+
+    n_combos = len(datasets) * len(args.modes) * len(args.rewriters) * len(reranks)
     print("═" * 110)
     print("  voyage-context-3 Test Harness")
     print("═" * 110)
     print(f"  Datasets   : {', '.join(datasets)}")
     print(f"  Modes      : {', '.join(args.modes)}")
     print(f"  Rewriters  : {', '.join(args.rewriters)}")
+    print(f"  Rerank     : {args.rerank}")
     print(f"  Sample/ds  : {args.sample}")
     print(f"  Queries/ds : {args.num_queries}")
-    print(f"  → {n_combos} dataset×mode×rewriter combinations")
+    print(f"  → {n_combos} dataset×strategy combinations")
 
     overall_t0 = time.time()
     results: list[DatasetResult] = []
     for dataset in datasets:
         results.append(run_dataset(
             dataset, args.sample, args.num_queries,
-            args.modes, args.rewriters, verbose=args.verbose,
+            args.modes, args.rewriters, reranks, verbose=args.verbose,
         ))
 
     print(f"\n  Total elapsed: {time.time() - overall_t0:.1f}s")
-    print_summary(results, args.modes, args.rewriters)
-    print_deltas(results, baseline=("vector", "none"))
-    print_comparison_charts(results, args.modes, args.rewriters)
+    print_summary(results, args.modes, args.rewriters, reranks)
+    print_deltas(results, baseline=("vector", "none", False))
+    print_comparison_charts(results, args.modes, args.rewriters, reranks)
 
     if args.report:
-        write_markdown_report(results, args.modes, args.rewriters, args.report)
+        write_markdown_report(results, args.modes, args.rewriters, reranks, args.report)
 
     failures = sum(1 for r in results if not r.overall_passed)
     sys.exit(1 if failures else 0)

@@ -140,6 +140,29 @@ python3 query.py scifact --rewriter multi --num-queries 10
 
 All rewriters except `none` require `OPENAI_API_KEY`.
 
+**Reranking** adds a cross-encoder second stage on top of any retrieval
+mode (`--rerank`):
+
+```bash
+python3 query.py scifact --mode hybrid --rerank
+```
+
+The flag is orthogonal to `--mode` and `--rewriter`. The first stage
+fetches 50 candidates; `rerank-2.5` then scores each `(query, candidate)`
+pair as a cross-encoder and returns the top 10.
+
+Empirically (`--sample 500 --num-queries 10`):
+
+| Dataset | vector | hybrid | hybrid+rerank | Best | Δ vs vector |
+|---|---|---|---|---|---|
+| scifact | 0.874 | 0.862 | **0.892** | hybrid+rerank | **+1.8** NDCG@10 |
+| nfcorpus | **0.781** | 0.676 | 0.741 | vector | — |
+
+Rerank works best when first-stage retrieval is **broad but noisy**
+(hybrid pulls in candidates from both semantic and lexical channels,
+giving the cross-encoder room to reorder). When pure vector already
+exhausts the relevant set, rerank just adds latency.
+
 Each mode returns results deduplicated to one chunk per parent document
 and scores them against the official qrels.
 

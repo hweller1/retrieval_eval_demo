@@ -28,6 +28,12 @@ Three entry points, a shared library, a metrics module, and a retrieval module:
   may return one or many texts; `none` is a passthrough that needs
   no OpenAI key. `query.py` flattens all rewrites into one batched
   Voyage embed call to keep latency down.
+- `rerank.py` — second-stage cross-encoder via `rerank-2.5`
+  (POST `/v1/rerank`). Orthogonal to `--mode` and `--rewriter`: when
+  enabled, `query.py` first fetches `RERANK_CANDIDATES=50` candidates
+  from the chosen mode, then sends them with the original query to
+  the reranker. Returns top-K with the cross-encoder's
+  `relevance_score` as the `score` field.
 - `ingest.py` — builds **both** the vector index and the Atlas Search text
   index in one pass. CLI: `python3 ingest.py <dataset> [--sample N] [--list]`
 - `query.py` — `python3 query.py <dataset> [--mode vector|text|hybrid]
@@ -156,9 +162,10 @@ voyage-demos/
 ├── retrieve.py             # vector / text / hybrid; multi_query_retrieve
 ├── llm_client.py           # thin OpenAI wrapper (lazy-imported)
 ├── query_rewriter.py       # none / hyde / multi / decompose
+├── rerank.py               # second-stage cross-encoder (rerank-2.5)
 ├── ingest.py               # builds vector + text indexes per dataset
-├── query.py                # CLI with --mode and --rewriter
-├── test_harness.py         # dataset × mode × rewriter; charts; --report
+├── query.py                # CLI with --mode --rewriter --rerank
+├── test_harness.py         # dataset × strategy; --rerank off|on|both
 ├── README.md               # user-facing docs
 └── CLAUDE.md               # this file
 ```
