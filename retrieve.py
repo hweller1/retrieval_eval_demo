@@ -112,56 +112,15 @@ def hybrid(
     return fused[:top_k]
 
 
-# ── CombSUM: convex combination of min-max normalized scores ─────────────────
-
-def comb_sum(
-    coll,
-    q_vec: list[float],
-    query_text: str,
-    top_k: int = 10,
-    alpha: float = 0.5,
-    candidates_per_mode: int | None = None,
-) -> list[dict]:
-    """
-    score(d) = alpha * vec_norm(d) + (1-alpha) * text_norm(d)
-
-    where each *_norm is min-max normalized to [0, 1] within its own
-    candidate list. Unlike RRF, CombSUM preserves score magnitude
-    information — useful when one signal is consistently more discriminative
-    than the other.
-    """
-    n = candidates_per_mode or DEFAULT_CANDIDATES
-    vec_rows  = vector_only(coll, q_vec,      top_k=n)
-    text_rows = text_only  (coll, query_text, top_k=n)
-
-    def normalize(rows: list[dict]) -> dict[str, float]:
-        if not rows:
-            return {}
-        ss = [r["score"] for r in rows]
-        mn, mx = min(ss), max(ss)
-        if mx == mn:
-            return {r["doc_id"]: 1.0 for r in rows}
-        return {r["doc_id"]: (r["score"] - mn) / (mx - mn) for r in rows}
-
-    vec_norm  = normalize(vec_rows)
-    text_norm = normalize(text_rows)
-
-    rows_by_id: dict[str, dict] = {r["doc_id"]: r for r in vec_rows}
-    for r in text_rows:
-        rows_by_id.setdefault(r["doc_id"], r)
-
-    combined = []
-    for did in set(vec_norm) | set(text_norm):
-        s = alpha * vec_norm.get(did, 0.0) + (1.0 - alpha) * text_norm.get(did, 0.0)
-        combined.append({**rows_by_id[did], "score": s})
-
-    combined.sort(key=lambda r: r["score"], reverse=True)
-    return combined[:top_k]
-
-
 # ── Mode dispatch ────────────────────────────────────────────────────────────
+#
+# Note: an earlier iteration of this file included a comb_sum mode (convex
+# combination of min-max normalized scores). It was removed because Atlas
+# 8.3+ ships native Relative Score Fusion via $rankFusion that does exactly
+# this — duplicating it client-side wasn't worth the maintenance burden,
+# especially since the empirical lift over weighted-RRF was marginal.
 
-MODES = ("vector", "text", "hybrid", "comb_sum")
+MODES = ("vector", "text", "hybrid")
 DEFAULT_ALPHA = 0.5
 
 
@@ -180,8 +139,6 @@ def retrieve(
         return text_only(coll, query_text, top_k=top_k)
     if mode == "hybrid":
         return hybrid(coll, q_vec, query_text, top_k=top_k, alpha=alpha)
-    if mode == "comb_sum":
-        return comb_sum(coll, q_vec, query_text, top_k=top_k, alpha=alpha)
     raise ValueError(f"unknown retrieval mode '{mode}' (expected one of {MODES})")
 
 

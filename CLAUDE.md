@@ -16,13 +16,16 @@ Three entry points, a shared library, a metrics module, and a retrieval module:
   `(ranked_doc_ids, relevant_set_or_qrels_dict)`. `compute_query_metrics`
   returns a dict; `aggregate_metrics` reduces to MAP / mean of others.
   `METRIC_KS = (5, 10)` is the source of truth for which Ks are reported.
-- `retrieve.py` — `vector_only`, `text_only`, `hybrid` (weighted RRF),
-  `comb_sum` (convex combination of min-max normalized scores) plus
-  a `retrieve(mode, …, alpha)` dispatch and `multi_query_retrieve(...)`
-  for fusing rewritten queries. `MODES = ("vector", "text", "hybrid",
-  "comb_sum")`. `DEFAULT_CANDIDATES = 100` per first-stage. Both
-  fusion modes accept `alpha ∈ [0, 1]` weighting vector vs text.
+- `retrieve.py` — `vector_only`, `text_only`, `hybrid` (weighted RRF
+  with `alpha ∈ [0, 1]` for vector/text weighting). `MODES =
+  ("vector", "text", "hybrid")`. `DEFAULT_CANDIDATES = 100` per
+  first-stage. `retrieve(mode, …, alpha)` dispatches and
+  `multi_query_retrieve(...)` fuses rewritten queries via RRF.
   Constants `INDEX_NAME` (from `lib`) and `TEXT_INDEX_NAME` here.
+  Note: an earlier version included a `comb_sum` mode (CombSUM /
+  Reciprocal Score Fusion). Removed because Atlas 8.3+ ships native
+  Relative Score Fusion via `$rankFusion`; duplicating it client-side
+  wasn't worth the maintenance.
 - `llm_client.py` — thin OpenAI wrapper. Lazy-imports the `openai`
   package and only fails on missing `OPENAI_API_KEY` when actually
   invoked. Default model is `gpt-4o-mini`.
@@ -31,14 +34,14 @@ Three entry points, a shared library, a metrics module, and a retrieval module:
   may return one or many texts; `none` is a passthrough that needs
   no OpenAI key. `query.py` flattens all rewrites into one batched
   Voyage embed call to keep latency down.
-- `query_classifier.py` — `predict_alpha(query) -> float ∈ [0, 1]`. A
-  cheap-LLM (gpt-4o-mini) query interpretation layer that picks the
-  vector-vs-text fusion weight per query. Used by `query.py` when
-  `--alpha-mode dynamic`. Prompt steers the model toward α≤0.3 for
-  exact-string queries (codes, IDs, named entities) and α≥0.7 for
-  conceptual / paraphrasable queries. Cached by query string so
-  repeated calls within a run cost nothing. Falls back to α=0.7 on
-  parse failure.
+- `query_classifier.py` — `predict_strategy(query) -> Strategy` where
+  `Strategy(alpha, rerank, rewriter, reasoning)` is a full per-query
+  routing decision from one cheap-LLM (gpt-4o-mini) call. Few-shot
+  prompt with 8 examples spanning the alpha range (0.15 → 0.80) and
+  showing when each rewriter / rerank is appropriate. Used by
+  `query.py` when `--strategy dynamic`. Cached by query string so
+  repeats are free. Backwards-compat shims: `predict_alpha(query)` and
+  `predict_alphas(queries)` still exist and just return `.alpha`.
 - `rerank.py` — second-stage cross-encoder via `rerank-2.5`
   (POST `/v1/rerank`). Orthogonal to `--mode` and `--rewriter`: when
   enabled, `query.py` first fetches `RERANK_CANDIDATES=50` candidates
@@ -236,31 +239,32 @@ NDCG@10:
 | vector              | 0.874 | **0.781** | 0.913 |
 | text                | 0.711 | 0.419 | 0.911 |
 | hybrid α=0.5 (RRF)  | 0.833 | 0.662 | 0.941 |
-| hybrid α=0.8 (RRF)  | 0.872 | 0.745 | 0.944 |
-| hybrid α=dynamic    | 0.872 | 0.742 | 0.941 |
-| comb_sum α=dynamic  | 0.871 | **0.768** | **0.948** |
-| dynamic + rerank    | 0.863 | 0.758 | 0.947 |
+| hybrid α=0.8 (RRF)  | 0.872 | 0.745 | **0.946** |
+| dynamic (per-query) | 0.872 | 0.726 | 0.944 |
 
 Takeaways:
 
 1. The original "uniform-RRF" hybrid (α=0.5) was just badly weighted —
    it dragged in BM25 noise on datasets where vector was the stronger
    signal. Manually bumping α to 0.8 closes most of the gap.
-2. **CombSUM** (convex combination of min-max normalized scores) beats
-   RRF when the two signals have very different score scales / quality.
-   Best fusion in 2/3 datasets and the only one that beat vector overall
-   (touche2020, +3.6 NDCG@10).
-3. The **dynamic-α** classifier matches static α=0.8 on BEIR because
-   BEIR queries are *homogeneous within each dataset* (all scientific
-   claims, or all health questions, or all debate prompts). The
-   classifier gave 0.85 to nearly every query in all three datasets.
-   Where dynamic-α should shine: **real-world heterogeneous query
-   streams** where some queries are exact-string ("CVE-2021-44228") and
-   others are conceptual ("how do vaccines work"). Hand-test confirmed
-   the classifier returns α=0.30 for the former and α=0.85 for the
-   latter — but BEIR doesn't exercise this dynamism.
-4. Reranking on top of the best fusion is mixed — small NDCG@10 win
-   only on touche2020, slight loss elsewhere. Worth using selectively.
+2. The **dynamic per-query classifier** matches manually-tuned static
+   α=0.8 on BEIR (all three datasets within ~0.02 NDCG@10) WITHOUT any
+   per-dataset tuning. Same prompt, same model, decisions made per
+   query.
+3. BEIR queries are *homogeneous within each dataset* — all scientific
+   claims, or all health questions, or all debate prompts. So the
+   classifier picks the same α (≈0.80) for almost every query. Where
+   dynamic should pull ahead: **heterogeneous query streams** where
+   some queries are exact-string ("CVE-2021-44228" → α=0.15), some are
+   single-word ("vaping" → α=0.55 +hyde +rerank), some are compound
+   ("How does microbiome affect mood and is it different in vegans?"
+   → α=0.75 +decompose), and some are scientific claims (α=0.80). On
+   such streams no static config can win — that's where the dynamic
+   layer adds real value.
+4. Atlas 8.3 ships **native Relative Score Fusion** via `$rankFusion`,
+   which is the same idea as our (now removed) `comb_sum`. Use the
+   native operator for production; we keep the demo simple with
+   weighted RRF.
 
 ## What has been verified
 

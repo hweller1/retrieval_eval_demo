@@ -7,14 +7,22 @@ Three retrieval modes are available:
 
   vector  : pure $vectorSearch over voyage-context-3 embeddings
   text    : pure $search (BM25) over the chunk text
-  hybrid  : Reciprocal Rank Fusion of vector + text results
+  hybrid  : weighted Reciprocal Rank Fusion of vector + text
+
+Two strategy modes:
+
+  static   — use the explicit --alpha / --rewriter / --rerank flags
+  dynamic  — for each query, a cheap LLM (gpt-4o-mini) decides alpha,
+             rerank on/off, and which rewriter (if any) to use. Same
+             classifier across all datasets. Requires OPENAI_API_KEY.
 
 Examples:
 
   python3 query.py --list
-  python3 query.py <dataset>                 # default mode: hybrid
+  python3 query.py <dataset>                                # default
   python3 query.py <dataset> --mode vector
-  python3 query.py <dataset> --num-queries 10
+  python3 query.py <dataset> --strategy dynamic             # per-query routing
+  python3 query.py <dataset> --rewriter hyde --rerank       # static + extras
 
 Requires `python3 ingest.py <dataset>` to have been run first.
 """
@@ -40,10 +48,10 @@ from query_rewriter import REWRITERS, DEFAULT_REWRITER, rewrite
 from rerank import rerank as rerank_rows
 import query_classifier
 
-DEFAULT_MODE       = "hybrid"
-ALPHA_MODES        = ("static", "dynamic")
-DEFAULT_ALPHA_MODE = "static"
-RERANK_CANDIDATES  = 50   # how many candidates to fetch from first-stage when reranking
+DEFAULT_MODE          = "hybrid"
+STRATEGY_MODES        = ("static", "dynamic")
+DEFAULT_STRATEGY_MODE = "static"
+RERANK_CANDIDATES     = 50   # candidates to fetch from first-stage when reranking
 
 
 @dataclass
@@ -59,12 +67,16 @@ class QueryResult:
 class RunResult:
     dataset: str
     mode: str
-    rewriter: str
+    rewriter: str            # baseline (when strategy=static) — overridden per-query when dynamic
     rerank: bool
+    strategy_mode: str
     num_queries: int
     chunks_in_collection: int
     per_query: list[QueryResult]
     aggregate: dict[str, float]
+    # Populated only when strategy_mode == "dynamic": the per-query strategy
+    # the classifier picked. Useful for demoing what routing happened.
+    per_query_strategies: list = field(default_factory=list)
 
 
 def _print_query_block(qr: QueryResult) -> None:
@@ -90,21 +102,30 @@ def query(
     rewriter: str = DEFAULT_REWRITER,
     rerank: bool = False,
     alpha: float = DEFAULT_ALPHA,
-    alpha_mode: str = DEFAULT_ALPHA_MODE,
+    strategy_mode: str = DEFAULT_STRATEGY_MODE,
     verbose: bool = True,
 ) -> RunResult:
     """
-    Run `num_queries` queries against the ingested collection in `mode`,
-    optionally applying a query `rewriter` first. Returns a RunResult with
-    per-query and aggregate metrics. When verbose, also prints results.
+    Run `num_queries` queries against the ingested collection.
+
+    When `strategy_mode == "static"`: uses the explicit `mode`, `alpha`,
+    `rewriter`, `rerank` arguments uniformly across all queries.
+
+    When `strategy_mode == "dynamic"`: a cheap LLM picks per-query alpha,
+    rewriter, and rerank flag. The user-supplied `mode` (vector/text/hybrid)
+    is preserved as the retrieval backend, but alpha/rewriter/rerank are
+    overridden per-query by the classifier.
+
+    Returns a RunResult with per-query and aggregate metrics.
     """
     require_credentials()
     if mode not in MODES:
         raise SystemExit(f"unknown --mode '{mode}' (expected one of {', '.join(MODES)})")
     if rewriter not in REWRITERS:
         raise SystemExit(f"unknown --rewriter '{rewriter}' (expected one of {', '.join(REWRITERS)})")
-    if alpha_mode not in ALPHA_MODES:
-        raise SystemExit(f"unknown --alpha-mode '{alpha_mode}' (expected one of {', '.join(ALPHA_MODES)})")
+    if strategy_mode not in STRATEGY_MODES:
+        raise SystemExit(f"unknown --strategy '{strategy_mode}' "
+                         f"(expected one of {', '.join(STRATEGY_MODES)})")
 
     import voyageai
     import pymongo
@@ -112,11 +133,15 @@ def query(
     coll_name = collection_name(dataset)
 
     if verbose:
-        header(f"Query  ×  {dataset}  ×  mode={mode}  ×  rewriter={rewriter}"
-               + ("  ×  +rerank" if rerank else ""))
+        header(f"Query  ×  {dataset}  ×  mode={mode}  ×  strategy={strategy_mode}")
         print(f"  Doc embedding   : {MODEL}")
         print(f"  Query embedding : {QUERY_MODEL}")
-        print(f"  Reranker        : {'rerank-2.5' if rerank else 'off'}")
+        if strategy_mode == "static":
+            print(f"  Rewriter        : {rewriter}")
+            print(f"  Reranker        : {'rerank-2.5' if rerank else 'off'}")
+            print(f"  α               : {alpha:.2f}")
+        else:
+            print(f"  Strategy        : per-query via gpt-4o-mini")
         print(f"  Collection      : {DB_NAME}.{coll_name}")
 
     mongo = pymongo.MongoClient(MONGODB_URI)
@@ -141,12 +166,27 @@ def query(
     if verbose:
         print(f"  Running {len(chosen_qids)} queries (of {len(queries):,} total) …")
 
-    # ── Apply rewriter to each query (yields list[str] per original query) ──
     raw_query_texts = [queries[qid] for qid in chosen_qids]
-    rewrites_per_query: list[list[str]] = [rewrite(rewriter, t) for t in raw_query_texts]
 
-    # ── Embed all rewrites in one batched call (any mode that uses vectors) ──
-    needs_vector = mode in ("vector", "hybrid", "comb_sum")
+    # ── Decide per-query strategy ────────────────────────────────────────────
+    # In static mode, every query uses the same alpha / rewriter / rerank.
+    # In dynamic mode, gpt-4o-mini picks each per-query.
+    per_query_strategies: list[query_classifier.Strategy] = []
+    if strategy_mode == "dynamic":
+        per_query_strategies = query_classifier.predict_strategies(raw_query_texts)
+    else:
+        for _ in raw_query_texts:
+            per_query_strategies.append(query_classifier.Strategy(
+                alpha=alpha, rerank=rerank, rewriter=rewriter, reasoning="<<static>>",
+            ))
+
+    # ── Apply each query's rewriter (may produce multiple rewritten texts) ──
+    rewrites_per_query: list[list[str]] = [
+        rewrite(s.rewriter, t) for s, t in zip(per_query_strategies, raw_query_texts)
+    ]
+
+    # ── Embed every rewritten text in one batched Voyage call ────────────────
+    needs_vector = mode in ("vector", "hybrid")
     flat_texts = [t for sub in rewrites_per_query for t in sub]
     if needs_vector and flat_texts:
         voyage = voyageai.Client(api_key=VOYAGE_API_KEY, base_url=MONGODB_BASE_URL)
@@ -154,7 +194,6 @@ def query(
     else:
         flat_vecs = [None] * len(flat_texts)
 
-    # Re-group vectors back per original query
     vecs_per_query: list[list[list[float] | None]] = []
     cursor = 0
     for sub in rewrites_per_query:
@@ -167,35 +206,23 @@ def query(
 
     per_query: list[QueryResult] = []
     top_n = max(METRIC_KS)
-    # When reranking, fetch a deeper candidate pool from first-stage retrieval
-    # so the cross-encoder has room to reorder useful misses up.
-    first_stage_k = RERANK_CANDIDATES if rerank else top_n
 
-    # If alpha_mode == "dynamic" and the mode actually uses alpha, ask the
-    # LLM to pick a per-query alpha based on query characteristics. Modes
-    # like "vector" / "text" ignore alpha entirely so we skip the call.
-    use_dynamic_alpha = (
-        alpha_mode == "dynamic" and mode in ("hybrid", "comb_sum")
-    )
-    if use_dynamic_alpha:
-        per_query_alphas = query_classifier.predict_alphas(raw_query_texts)
-    else:
-        per_query_alphas = [alpha] * len(raw_query_texts)
-
-    for qid, original_text, sub_texts, sub_vecs, q_alpha in zip(
+    for qid, original_text, sub_texts, sub_vecs, strat in zip(
         chosen_qids, raw_query_texts, rewrites_per_query, vecs_per_query,
-        per_query_alphas,
+        per_query_strategies,
     ):
         qrel = qrels.get(qid, {})
         relevant_set = {did for did, s in qrel.items() if s > 0}
 
+        # Reranking needs a deeper candidate pool from first-stage retrieval
+        first_stage_k = RERANK_CANDIDATES if strat.rerank else top_n
+
         sub_queries = list(zip(sub_vecs, sub_texts))
         ranked_rows = multi_query_retrieve(
-            mode, coll, sub_queries, top_k=first_stage_k, alpha=q_alpha,
+            mode, coll, sub_queries, top_k=first_stage_k, alpha=strat.alpha,
         )
 
-        if rerank and ranked_rows:
-            # Cross-encode against the original (un-rewritten) query for fairness
+        if strat.rerank and ranked_rows:
             ranked_rows = rerank_rows(original_text, ranked_rows, top_k=top_n)
 
         ranked_ids = [r["doc_id"] for r in ranked_rows]
@@ -215,9 +242,9 @@ def query(
 
         if verbose:
             _print_query_block(qr)
-            if use_dynamic_alpha:
-                print(f"        ↳ classifier α={q_alpha:.2f}")
-            if rewriter != "none" and len(sub_texts) > 0:
+            if strategy_mode == "dynamic":
+                print(f"        ↳ routed: {strat.label()}  ({strat.reasoning})")
+            if strat.rewriter != "none" and len(sub_texts) > 0:
                 print(f"        ↳ rewriter produced {len(sub_texts)} text(s); "
                       f"first: \"{sub_texts[0][:80]}\"")
 
@@ -227,7 +254,7 @@ def query(
         header("Summary")
         print(f"  Dataset           : {dataset}")
         print(f"  Mode              : {mode}")
-        print(f"  Rewriter          : {rewriter}")
+        print(f"  Strategy          : {strategy_mode}")
         print(f"  Queries evaluated : {len(chosen_qids)}")
         print()
         print(f"  {format_summary(aggregate)}")
@@ -240,10 +267,12 @@ def query(
         mode=mode,
         rewriter=rewriter,
         rerank=rerank,
+        strategy_mode=strategy_mode,
         num_queries=len(chosen_qids),
         chunks_in_collection=count,
         per_query=per_query,
         aggregate=aggregate,
+        per_query_strategies=per_query_strategies if strategy_mode == "dynamic" else [],
     )
 
 
@@ -264,14 +293,15 @@ def main() -> None:
     p.add_argument("--rerank", action="store_true",
                    help="apply Voyage rerank-2.5 cross-encoder as a second stage")
     p.add_argument("--alpha", type=float, default=DEFAULT_ALPHA,
-                   help="vector weight for hybrid/comb_sum fusion (0=text only, "
-                        f"1=vector only, 0.5=balanced; default: {DEFAULT_ALPHA}). "
-                        "Ignored when --alpha-mode is dynamic.")
-    p.add_argument("--alpha-mode", choices=ALPHA_MODES, default=DEFAULT_ALPHA_MODE,
-                   help="how to choose alpha per query: 'static' uses --alpha for "
-                        "every query; 'dynamic' has a cheap LLM (gpt-4o-mini) "
-                        "predict alpha per query based on its characteristics. "
-                        f"(default: {DEFAULT_ALPHA_MODE}; dynamic requires OPENAI_API_KEY)")
+                   help="vector weight for hybrid fusion (0=text only, 1=vector only, "
+                        f"0.5=balanced; default: {DEFAULT_ALPHA}). Ignored under "
+                        "--strategy dynamic.")
+    p.add_argument("--strategy", choices=STRATEGY_MODES, default=DEFAULT_STRATEGY_MODE,
+                   help="how each query's full strategy (alpha + rewriter + rerank) "
+                        "is chosen. 'static' uses the explicit flags; 'dynamic' has "
+                        "gpt-4o-mini decide per query based on the query's "
+                        "characteristics. Same classifier across all datasets. "
+                        f"(default: {DEFAULT_STRATEGY_MODE}; dynamic requires OPENAI_API_KEY)")
     p.add_argument("--num-queries", type=int, default=DEFAULT_QUERIES,
                    help=f"how many queries to run (default: {DEFAULT_QUERIES})")
     args = p.parse_args()
@@ -284,7 +314,7 @@ def main() -> None:
 
     query(args.dataset, num_queries=args.num_queries,
           mode=args.mode, rewriter=args.rewriter, rerank=args.rerank,
-          alpha=args.alpha, alpha_mode=args.alpha_mode)
+          alpha=args.alpha, strategy_mode=args.strategy)
 
 
 if __name__ == "__main__":
