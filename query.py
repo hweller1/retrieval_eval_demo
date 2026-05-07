@@ -1,11 +1,19 @@
 """
 query.py — embed BEIR queries with voyage-3-large, retrieve from the
-ingested MongoDB collection via $vectorSearch, and report a full IR
-metric suite (P@K, R@K, NDCG@K, MRR, MAP) against official relevance
-judgments.
+ingested MongoDB collection, and report a full IR metric suite (P@K,
+R@K, NDCG@K, MRR, MAP) against official relevance judgments.
+
+Three retrieval modes are available:
+
+  vector  : pure $vectorSearch over voyage-context-3 embeddings
+  text    : pure $search (BM25) over the chunk text
+  hybrid  : Reciprocal Rank Fusion of vector + text results
+
+Examples:
 
   python3 query.py --list
-  python3 query.py <dataset>
+  python3 query.py <dataset>                 # default mode: hybrid
+  python3 query.py <dataset> --mode vector
   python3 query.py <dataset> --num-queries 10
 
 Requires `python3 ingest.py <dataset>` to have been run first.
@@ -27,6 +35,9 @@ from lib import (
 from lib_metrics import (
     METRIC_KS, aggregate_metrics, compute_query_metrics, format_summary,
 )
+from retrieve import MODES, retrieve
+
+DEFAULT_MODE = "hybrid"
 
 
 @dataclass
@@ -35,38 +46,17 @@ class QueryResult:
     text: str
     relevant_count: int
     metrics: dict[str, float]
-    top_docs: list[dict] = field(default_factory=list)  # raw $vectorSearch rows for printing
+    top_docs: list[dict] = field(default_factory=list)
 
 
 @dataclass
 class RunResult:
     dataset: str
+    mode: str
     num_queries: int
     chunks_in_collection: int
     per_query: list[QueryResult]
     aggregate: dict[str, float]
-
-
-def _retrieve(coll, q_vec: list[float], top_k: int) -> list[dict]:
-    """Run $vectorSearch and dedupe to best chunk per parent doc."""
-    pipeline = [
-        {"$vectorSearch": {
-            "index"        : INDEX_NAME,
-            "path"         : "embedding",
-            "queryVector"  : q_vec,
-            "numCandidates": top_k * 20,
-            "limit"        : top_k * 4,
-        }},
-        {"$addFields": {"score": {"$meta": "vectorSearchScore"}}},
-        {"$sort": {"score": -1}},
-    ]
-    raw = list(coll.aggregate(pipeline))
-    seen: dict[str, dict] = {}
-    for row in raw:
-        did = row["doc_id"]
-        if did not in seen or row["score"] > seen[did]["score"]:
-            seen[did] = row
-    return sorted(seen.values(), key=lambda r: r["score"], reverse=True)
 
 
 def _print_query_block(qr: QueryResult) -> None:
@@ -77,8 +67,6 @@ def _print_query_block(qr: QueryResult) -> None:
           f"NDCG@5={m['NDCG@5']:.3f}  MRR={m['MRR']:.3f}  AP={m['AP']:.3f}")
     print(f"  {'─' * 66}")
     for rank, row in enumerate(qr.top_docs[:TOP_K], 1):
-        # Not ideal — we don't know the relevant set here, so we re-mark
-        # at print time using the position in top_docs that matched.
         marker = "✓" if row.get("_relevant") else " "
         title  = row["title"] or "(untitled)"
         title  = (title[:55] + "…") if len(title) > 56 else title
@@ -87,12 +75,20 @@ def _print_query_block(qr: QueryResult) -> None:
         print(f"        {snippet}")
 
 
-def query(dataset: str, num_queries: int = DEFAULT_QUERIES, verbose: bool = True) -> RunResult:
+def query(
+    dataset: str,
+    num_queries: int = DEFAULT_QUERIES,
+    mode: str = DEFAULT_MODE,
+    verbose: bool = True,
+) -> RunResult:
     """
-    Run `num_queries` against the ingested collection and return RunResult
-    with per-query and aggregate metrics. When `verbose`, also prints results.
+    Run `num_queries` queries against the ingested collection in `mode` and
+    return a RunResult with per-query and aggregate metrics. When verbose,
+    also prints results.
     """
     require_credentials()
+    if mode not in MODES:
+        raise SystemExit(f"unknown --mode '{mode}' (expected one of {', '.join(MODES)})")
 
     import voyageai
     import pymongo
@@ -100,8 +96,10 @@ def query(dataset: str, num_queries: int = DEFAULT_QUERIES, verbose: bool = True
     coll_name = collection_name(dataset)
 
     if verbose:
-        header(f"Query  ×  {dataset}  ×  {MODEL} / {QUERY_MODEL}")
-        print(f"  Collection : {DB_NAME}.{coll_name}")
+        header(f"Query  ×  {dataset}  ×  mode={mode}")
+        print(f"  Doc embedding   : {MODEL}")
+        print(f"  Query embedding : {QUERY_MODEL}")
+        print(f"  Collection      : {DB_NAME}.{coll_name}")
 
     mongo = pymongo.MongoClient(MONGODB_URI)
     coll  = mongo[DB_NAME][coll_name]
@@ -113,7 +111,7 @@ def query(dataset: str, num_queries: int = DEFAULT_QUERIES, verbose: bool = True
         )
 
     if verbose:
-        print(f"  Chunks in collection: {count:,}")
+        print(f"  Chunks          : {count:,}")
 
     _, queries, qrels, info = load_beir_dataset(dataset)
 
@@ -125,25 +123,31 @@ def query(dataset: str, num_queries: int = DEFAULT_QUERIES, verbose: bool = True
     if verbose:
         print(f"  Running {len(chosen_qids)} queries (of {len(queries):,} total) …")
 
-    voyage = voyageai.Client(api_key=VOYAGE_API_KEY, base_url=MONGODB_BASE_URL)
+    # Vector mode needs a query embedding; text mode does not. Always compute
+    # if the mode might use it (vector or hybrid) so we don't branch later.
+    needs_vector = mode in ("vector", "hybrid")
     query_texts = [queries[qid] for qid in chosen_qids]
-    query_vecs  = embed_queries(voyage, query_texts)
+    if needs_vector:
+        voyage = voyageai.Client(api_key=VOYAGE_API_KEY, base_url=MONGODB_BASE_URL)
+        query_vecs = embed_queries(voyage, query_texts)
+    else:
+        query_vecs = [None] * len(query_texts)
 
     if verbose:
         header("Results")
 
     per_query: list[QueryResult] = []
+    top_n = max(METRIC_KS)
 
     for qid, q_text, q_vec in zip(chosen_qids, query_texts, query_vecs):
         qrel = qrels.get(qid, {})
         relevant_set = {did for did, s in qrel.items() if s > 0}
 
-        ranked_rows = _retrieve(coll, q_vec, top_k=max(METRIC_KS))
+        ranked_rows = retrieve(mode, coll, q_vec, q_text, top_k=top_n)
         ranked_ids  = [r["doc_id"] for r in ranked_rows]
 
         metrics = compute_query_metrics(ranked_ids, qrel)
 
-        # Tag rows with relevance for printing
         for row in ranked_rows:
             row["_relevant"] = row["doc_id"] in relevant_set
 
@@ -162,10 +166,9 @@ def query(dataset: str, num_queries: int = DEFAULT_QUERIES, verbose: bool = True
 
     if verbose:
         header("Summary")
-        print(f"  Dataset             : {dataset}")
-        print(f"  Queries evaluated   : {len(chosen_qids)}")
-        print(f"  Doc embedding model : {MODEL}")
-        print(f"  Query embedding     : {QUERY_MODEL}")
+        print(f"  Dataset           : {dataset}")
+        print(f"  Mode              : {mode}")
+        print(f"  Queries evaluated : {len(chosen_qids)}")
         print()
         print(f"  {format_summary(aggregate)}")
         print()
@@ -174,6 +177,7 @@ def query(dataset: str, num_queries: int = DEFAULT_QUERIES, verbose: bool = True
 
     return RunResult(
         dataset=dataset,
+        mode=mode,
         num_queries=len(chosen_qids),
         chunks_in_collection=count,
         per_query=per_query,
@@ -184,12 +188,14 @@ def query(dataset: str, num_queries: int = DEFAULT_QUERIES, verbose: bool = True
 def main() -> None:
     p = argparse.ArgumentParser(
         prog="query.py",
-        description="Query an ingested BEIR dataset via MongoDB Atlas Vector Search.",
+        description="Query an ingested BEIR dataset via MongoDB Atlas Vector / Text / Hybrid search.",
     )
     p.add_argument("dataset", nargs="?", choices=list(DATASETS.keys()),
                    help="dataset to query (omit and pass --list to see options)")
     p.add_argument("--list", action="store_true",
                    help="print supported BEIR datasets and exit")
+    p.add_argument("--mode", choices=MODES, default=DEFAULT_MODE,
+                   help=f"retrieval mode (default: {DEFAULT_MODE})")
     p.add_argument("--num-queries", type=int, default=DEFAULT_QUERIES,
                    help=f"how many queries to run (default: {DEFAULT_QUERIES})")
     args = p.parse_args()
@@ -200,7 +206,7 @@ def main() -> None:
     if not args.dataset:
         p.error("dataset is required (or pass --list to see supported datasets)")
 
-    query(args.dataset, num_queries=args.num_queries)
+    query(args.dataset, num_queries=args.num_queries, mode=args.mode)
 
 
 if __name__ == "__main__":

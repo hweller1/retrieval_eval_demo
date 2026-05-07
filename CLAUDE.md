@@ -10,21 +10,26 @@ model) running through the **MongoDB-hosted Voyage AI endpoint**, evaluated
 against **BEIR** retrieval benchmarks with chunks stored in MongoDB Atlas
 Vector Search.
 
-Three entry points, a shared library, and a metrics module:
+Three entry points, a shared library, a metrics module, and a retrieval module:
 - `lib.py` — shared dataset registry, splitter, embedding helpers, constants
-- `lib_metrics.py` — IR metrics (P@K, R@K, NDCG@K, MRR, AP) operating over a
-  `(ranked_doc_ids, relevant_set_or_qrels_dict)` pair. `compute_query_metrics`
+- `lib_metrics.py` — IR metrics (P@K, R@K, NDCG@K, MRR, AP) over
+  `(ranked_doc_ids, relevant_set_or_qrels_dict)`. `compute_query_metrics`
   returns a dict; `aggregate_metrics` reduces to MAP / mean of others.
   `METRIC_KS = (5, 10)` is the source of truth for which Ks are reported.
-- `ingest.py` — CLI: `python3 ingest.py <dataset> [--sample N]` (also `--list`)
-- `query.py` — CLI: `python3 query.py <dataset> [--num-queries N]` (also `--list`).
-  `query.query(...)` returns a `RunResult` dataclass with `.aggregate` (dict
-  of metric name → float) and `.per_query` (list of `QueryResult`). When
-  `verbose=False` it is silent — the harness uses this to capture metrics
-  without stdout-scraping.
+- `retrieve.py` — `vector_only`, `text_only`, `hybrid` (RRF, k=60) plus a
+  `retrieve(mode, …)` dispatch. `MODES = ("vector", "text", "hybrid")`.
+  Constants `INDEX_NAME` (vector, from `lib`) and `TEXT_INDEX_NAME` here.
+- `ingest.py` — builds **both** the vector index and the Atlas Search text
+  index in one pass. CLI: `python3 ingest.py <dataset> [--sample N] [--list]`
+- `query.py` — `python3 query.py <dataset> [--mode vector|text|hybrid]
+  [--num-queries N] [--list]`. Default mode is `hybrid`.
+  `query.query(...)` returns a `RunResult` with `.aggregate`, `.per_query`,
+  and `.mode`. When `verbose=False` it is silent — the harness uses this
+  to capture metrics without stdout-scraping.
 - `test_harness.py` — imports `ingest.ingest` and `query.query` directly.
-  Renders a wide summary table and per-metric ASCII bar charts. Optional
-  `--report PATH` writes a Markdown comparison.
+  Runs every dataset × mode combination, renders summary + Δ-vs-vector
+  table + per-metric grouped bar charts (one bar per mode per dataset).
+  Optional `--report PATH` writes a Markdown comparison.
 
 ## Key facts you must not relearn
 
@@ -139,9 +144,10 @@ voyage-demos/
 ├── .env                    # VOYAGE_API_KEY, MONGODB_URI (gitignored)
 ├── lib.py                  # shared registry/splitter/embedding helpers/constants
 ├── lib_metrics.py          # IR metrics: P@K, R@K, NDCG@K, MRR, AP/MAP
-├── ingest.py               # CLI: ingest <dataset> [--sample N] [--list]
-├── query.py                # CLI: query  <dataset> [--num-queries N] [--list]
-├── test_harness.py         # end-to-end validation; ASCII bar charts; --report
+├── retrieve.py             # vector / text / hybrid (RRF) retrieval
+├── ingest.py               # builds vector + text indexes per dataset
+├── query.py                # CLI with --mode vector|text|hybrid
+├── test_harness.py         # all dataset × mode combos; charts; --report
 ├── README.md               # user-facing docs
 └── CLAUDE.md               # this file
 ```
@@ -199,7 +205,8 @@ python3 test_harness.py --sample 100 --num-queries 3
 | `404 Not Found` on contextualized endpoint | Endpoint path is one word: `contextualizedembeddings`, no slash before "embeddings". |
 | `Authentication failed` on MongoDB | URI credentials wrong, or password contains unencoded special chars (`@` → `%40`). The connection itself is fine if the cluster hostname resolves. |
 | `KeyError` during ingest sample step | qrels referencing doc IDs not in the corpus. Intersect with `corpus.keys()`. |
-| Index never becomes queryable | Atlas vector index typically takes 30–60s on a fresh collection; `cmd_ingest` polls for 150s, then proceeds anyway. |
+| Index never becomes queryable | Atlas vector index typically takes 30–60s on a fresh collection; the text index can take longer. `ingest.py` polls for ~5 min, then proceeds anyway. |
+| `'SearchIndexModel' object is not subscriptable` | `SearchIndexModel(...)` returns an object, not a dict. Don't do `model["name"]`. Track names in a parallel list/tuple instead. |
 
 ## What NOT to do
 

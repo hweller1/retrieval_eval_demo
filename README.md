@@ -103,14 +103,27 @@ Different datasets coexist in their own collections.
 ### Run queries
 
 ```bash
-python3 query.py touche2020                  # 5 queries (default)
-python3 query.py scifact --num-queries 20    # more queries
+python3 query.py touche2020                       # default mode: hybrid
+python3 query.py scifact --mode vector            # pure vector search
+python3 query.py scifact --mode text              # pure $search (BM25)
+python3 query.py scifact --mode hybrid            # RRF over vector + text
+python3 query.py scifact --num-queries 20
 ```
 
-Queries are embedded with `voyage-3-large` (same generation as
-voyage-context-3, compatible embedding space). Each query runs through a
-`$vectorSearch` aggregation, results are deduplicated to one chunk per
-parent document, and the top-K are scored against the official qrels.
+**Three retrieval modes** are available, all backed by the same indexed
+collection:
+
+| Mode | Backend | When it wins |
+|---|---|---|
+| `vector` | `$vectorSearch` over voyage-context-3 embeddings | Semantic / paraphrased queries; long-context preservation |
+| `text` | `$search` (Atlas Search, BM25) over chunk text | Exact strings, codes, named entities, abbreviations |
+| `hybrid` | RRF (k=60) over vector + text rankings | Real-world workloads — typically best on average |
+
+`ingest.py` builds **both** indexes per dataset, so all three modes
+are available without re-ingesting.
+
+Each mode returns results deduplicated to one chunk per parent document
+and scores them against the official qrels.
 
 Output for each query shows:
 - The query text
@@ -128,12 +141,17 @@ dataset. It runs `ingest` then `query` for each, checks MongoDB state,
 parses the metrics, and prints a pass/fail table.
 
 ```bash
-python3 test_harness.py --quick                       # 3 small datasets (~2 min)
-python3 test_harness.py                                # all 8 datasets (~6 min)
+python3 test_harness.py --quick                       # 3 small datasets, all 3 modes
+python3 test_harness.py                                # all 8 datasets, all 3 modes
 python3 test_harness.py --datasets scifact fiqa        # specific datasets
+python3 test_harness.py --modes vector hybrid          # subset of modes
 python3 test_harness.py --sample 500 --num-queries 10
 python3 test_harness.py --quick --report report.md     # also write a markdown comparison
 ```
+
+For each (dataset × mode) the harness runs ingest once and queries
+three times (one per mode), then prints a Δ-vs-vector table and per-metric
+comparison charts.
 
 Output has three parts: a per-dataset summary table, ASCII bar charts
 comparing each metric across datasets, and an optional Markdown file

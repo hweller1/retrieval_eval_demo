@@ -26,6 +26,7 @@ from lib import (
     collection_name, embed_contextualized, header, load_beir_dataset,
     print_dataset_list, require_credentials, split_text,
 )
+from retrieve import TEXT_INDEX_NAME
 
 
 def ingest(dataset: str, corpus_sample: int | None = CORPUS_SAMPLE) -> None:
@@ -129,34 +130,56 @@ def ingest(dataset: str, corpus_sample: int | None = CORPUS_SAMPLE) -> None:
         coll.insert_many(records[i : i + INGEST_BATCH])
     print(f"  ✓ Done in {time.time() - t0:.1f}s")
 
-    # --- 5. Create vector index -----------------------------------------
-    header("Step 4 — Creating vector search index")
-    index_def = SearchIndexModel(
+    # --- 5. Create vector + text search indexes -------------------------
+    header("Step 4 — Creating search indexes (vector + text)")
+    vector_index = SearchIndexModel(
         definition={"fields": [{
             "type": "vector", "path": "embedding",
             "numDimensions": dims, "similarity": "cosine",
         }]},
         name=INDEX_NAME, type="vectorSearch",
     )
-    existing = [idx["name"] for idx in coll.list_search_indexes()]
-    if INDEX_NAME in existing:
-        print(f"  Index '{INDEX_NAME}' already exists.")
-    else:
-        coll.create_search_index(index_def)
-        print(f"  Index '{INDEX_NAME}' created. Waiting for it to become queryable …")
-        for _ in range(30):
+    text_index = SearchIndexModel(
+        definition={
+            "mappings": {
+                "dynamic": False,
+                "fields": {
+                    "text" : {"type": "string", "analyzer": "lucene.standard"},
+                    "title": {"type": "string", "analyzer": "lucene.standard"},
+                },
+            }
+        },
+        name=TEXT_INDEX_NAME, type="search",
+    )
+
+    existing = {idx["name"] for idx in coll.list_search_indexes()}
+    to_create: list[str] = []
+    for idx_name, idx_model in [(INDEX_NAME, vector_index),
+                                (TEXT_INDEX_NAME, text_index)]:
+        if idx_name in existing:
+            print(f"  Index '{idx_name}' already exists.")
+        else:
+            coll.create_search_index(idx_model)
+            to_create.append(idx_name)
+            print(f"  Index '{idx_name}' created.")
+
+    if to_create:
+        print(f"  Waiting for indexes to become queryable …")
+        for _ in range(60):  # up to 5 minutes — text indexes can be slow
             time.sleep(5)
-            ready = any(idx["name"] == INDEX_NAME and idx.get("queryable")
-                        for idx in coll.list_search_indexes())
-            if ready:
-                print("  ✓ Index is queryable.")
+            statuses = {idx["name"]: idx.get("queryable", False)
+                        for idx in coll.list_search_indexes()}
+            if all(statuses.get(n) for n in to_create):
+                print(f"  ✓ All indexes queryable.")
                 break
         else:
-            print("  Index still building — first query may be slow.")
+            print(f"  Some indexes still building — first query may be slow.")
 
     print()
     print(f"  Ingest complete. Run queries with:")
-    print(f"      python3 query.py {dataset}")
+    print(f"      python3 query.py {dataset}                    # default mode: hybrid")
+    print(f"      python3 query.py {dataset} --mode vector")
+    print(f"      python3 query.py {dataset} --mode text")
     print()
     mongo.close()
 
