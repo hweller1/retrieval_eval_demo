@@ -10,12 +10,21 @@ model) running through the **MongoDB-hosted Voyage AI endpoint**, evaluated
 against **BEIR** retrieval benchmarks with chunks stored in MongoDB Atlas
 Vector Search.
 
-Three entry points and a shared library:
+Three entry points, a shared library, and a metrics module:
 - `lib.py` — shared dataset registry, splitter, embedding helpers, constants
+- `lib_metrics.py` — IR metrics (P@K, R@K, NDCG@K, MRR, AP) operating over a
+  `(ranked_doc_ids, relevant_set_or_qrels_dict)` pair. `compute_query_metrics`
+  returns a dict; `aggregate_metrics` reduces to MAP / mean of others.
+  `METRIC_KS = (5, 10)` is the source of truth for which Ks are reported.
 - `ingest.py` — CLI: `python3 ingest.py <dataset> [--sample N]` (also `--list`)
-- `query.py` — CLI: `python3 query.py <dataset> [--num-queries N]` (also `--list`)
-- `test_harness.py` — end-to-end validation across all supported BEIR datasets,
-  imports `ingest.ingest()` and `query.query()` directly
+- `query.py` — CLI: `python3 query.py <dataset> [--num-queries N]` (also `--list`).
+  `query.query(...)` returns a `RunResult` dataclass with `.aggregate` (dict
+  of metric name → float) and `.per_query` (list of `QueryResult`). When
+  `verbose=False` it is silent — the harness uses this to capture metrics
+  without stdout-scraping.
+- `test_harness.py` — imports `ingest.ingest` and `query.query` directly.
+  Renders a wide summary table and per-metric ASCII bar charts. Optional
+  `--report PATH` writes a Markdown comparison.
 
 ## Key facts you must not relearn
 
@@ -129,9 +138,10 @@ When `corpus_sample < len(corpus)`:
 voyage-demos/
 ├── .env                    # VOYAGE_API_KEY, MONGODB_URI (gitignored)
 ├── lib.py                  # shared registry/splitter/embedding helpers/constants
+├── lib_metrics.py          # IR metrics: P@K, R@K, NDCG@K, MRR, AP/MAP
 ├── ingest.py               # CLI: ingest <dataset> [--sample N] [--list]
 ├── query.py                # CLI: query  <dataset> [--num-queries N] [--list]
-├── test_harness.py         # end-to-end validation across all BEIR datasets
+├── test_harness.py         # end-to-end validation; ASCII bar charts; --report
 ├── README.md               # user-facing docs
 └── CLAUDE.md               # this file
 ```

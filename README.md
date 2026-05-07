@@ -115,10 +115,11 @@ parent document, and the top-K are scored against the official qrels.
 Output for each query shows:
 - The query text
 - Number of relevant docs in the ingested sample
-- Precision@5 and Average Precision
+- Per-query metrics: **P@5, R@5, NDCG@5, MRR, AP**
 - The top-5 retrieved docs marked `[✓]` if relevant, with snippets
 
-A summary block at the end reports mean P@5 and MAP.
+A summary block at the end reports the aggregate **P@5, R@5, NDCG@5,
+NDCG@10, MRR, MAP** across all queries.
 
 ## Test harness
 
@@ -127,27 +128,38 @@ dataset. It runs `ingest` then `query` for each, checks MongoDB state,
 parses the metrics, and prints a pass/fail table.
 
 ```bash
-python3 test_harness.py --quick                 # 3 small datasets (~2 min)
-python3 test_harness.py                          # all 8 datasets (~6 min)
-python3 test_harness.py --datasets scifact fiqa  # specific datasets
+python3 test_harness.py --quick                       # 3 small datasets (~2 min)
+python3 test_harness.py                                # all 8 datasets (~6 min)
+python3 test_harness.py --datasets scifact fiqa        # specific datasets
 python3 test_harness.py --sample 500 --num-queries 10
+python3 test_harness.py --quick --report report.md     # also write a markdown comparison
 ```
 
-Sample output:
+Output has three parts: a per-dataset summary table, ASCII bar charts
+comparing each metric across datasets, and an optional Markdown file
+suitable for sharing or pasting into a PR description.
 
 ```
-Dataset            Ingest      Query     Chunks     MAP     P@5  Status
-────────────── ────────── ────────── ────────── ─────── ───────  ──────
-touche2020          36.1s       7.5s        546   0.652   1.000  PASS
-scifact             39.7s       2.3s        309   0.778   0.200  PASS
-fiqa                35.6s       2.2s        148   0.900   0.267  PASS
-nfcorpus            41.8s       1.9s        296   0.255   1.000  PASS
-arguana             30.1s       2.1s        123   0.833   0.200  PASS
-trec-covid          46.6s       2.5s        244   0.007   0.333  PASS
-scidocs             69.9s       2.3s        216   0.768   0.667  PASS
-quora               40.4s       2.4s        100   1.000   0.600  PASS
+Dataset         Ingest   Query   Chunks      P@5      R@5   NDCG@5  NDCG@10      MRR      MAP  Status
+────────────── ─────── ─────── ──────── ──────── ──────── ──────── ──────── ──────── ────────  ──────
+scifact          38.4s    5.2s      309    0.200    1.000    0.833    0.833    0.778    0.778  PASS
+nfcorpus         35.3s    1.8s      296    1.000    0.144    0.914    0.879    1.000    0.410  PASS
+arguana          34.9s    2.4s      123    0.200    1.000    0.877    0.877    0.833    0.833  PASS
 
-8/8 datasets passed
+3/3 datasets passed
+```
+
+```
+NDCG@10
+  scifact   ████████████████████      0.833
+  nfcorpus  █████████████████████▏    0.879
+  arguana   █████████████████████     0.877
+
+MAP
+  scifact   ██████████████████▋       0.778
+  nfcorpus  █████████▉                0.410
+  arguana   ████████████████████      0.833
+…
 ```
 
 The harness exits non-zero if any dataset fails, so it's CI-friendly.
