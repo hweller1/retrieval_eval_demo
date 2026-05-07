@@ -124,6 +124,45 @@ def retrieve(mode: str, coll, q_vec: list[float], query_text: str, top_k: int = 
     raise ValueError(f"unknown retrieval mode '{mode}' (expected one of {MODES})")
 
 
+def multi_query_retrieve(
+    mode: str,
+    coll,
+    queries: list[tuple[list[float] | None, str]],
+    top_k: int = 10,
+    k_rrf: int = 60,
+    candidates_per_query: int | None = None,
+) -> list[dict]:
+    """
+    Fuse retrieval results from multiple (q_vec, q_text) pairs via RRF.
+
+    Used by query_rewriter outputs that produce more than one rewrite (e.g.
+    multi / decompose). For a single-element queries list this returns the
+    same result as retrieve(mode, ...).
+    """
+    if len(queries) == 1:
+        q_vec, q_text = queries[0]
+        return retrieve(mode, coll, q_vec, q_text, top_k=top_k)
+
+    n = candidates_per_query or top_k * 2
+    rrf_scores: dict[str, float] = defaultdict(float)
+    rows_by_id: dict[str, dict]  = {}
+
+    for q_vec, q_text in queries:
+        rows = retrieve(mode, coll, q_vec, q_text, top_k=n)
+        for rank, row in enumerate(rows, 1):
+            rrf_scores[row["doc_id"]] += 1.0 / (k_rrf + rank)
+            rows_by_id.setdefault(row["doc_id"], row)
+
+    fused = []
+    for doc_id, score in rrf_scores.items():
+        row = dict(rows_by_id[doc_id])
+        row["score"] = score
+        fused.append(row)
+
+    fused.sort(key=lambda r: r["score"], reverse=True)
+    return fused[:top_k]
+
+
 # ── Internal helpers ─────────────────────────────────────────────────────────
 
 def _dedup_by_doc_id(rows: Iterable[dict]) -> list[dict]:

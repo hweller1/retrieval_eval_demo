@@ -17,8 +17,17 @@ Three entry points, a shared library, a metrics module, and a retrieval module:
   returns a dict; `aggregate_metrics` reduces to MAP / mean of others.
   `METRIC_KS = (5, 10)` is the source of truth for which Ks are reported.
 - `retrieve.py` — `vector_only`, `text_only`, `hybrid` (RRF, k=60) plus a
-  `retrieve(mode, …)` dispatch. `MODES = ("vector", "text", "hybrid")`.
+  `retrieve(mode, …)` dispatch and `multi_query_retrieve(...)` for fusing
+  multiple rewritten queries. `MODES = ("vector", "text", "hybrid")`.
   Constants `INDEX_NAME` (vector, from `lib`) and `TEXT_INDEX_NAME` here.
+- `llm_client.py` — thin OpenAI wrapper. Lazy-imports the `openai`
+  package and only fails on missing `OPENAI_API_KEY` when actually
+  invoked. Default model is `gpt-4o-mini`.
+- `query_rewriter.py` — `rewrite(strategy, query) -> list[str]` with
+  `REWRITERS = ("none", "hyde", "multi", "decompose")`. Each rewriter
+  may return one or many texts; `none` is a passthrough that needs
+  no OpenAI key. `query.py` flattens all rewrites into one batched
+  Voyage embed call to keep latency down.
 - `ingest.py` — builds **both** the vector index and the Atlas Search text
   index in one pass. CLI: `python3 ingest.py <dataset> [--sample N] [--list]`
 - `query.py` — `python3 query.py <dataset> [--mode vector|text|hybrid]
@@ -141,13 +150,15 @@ When `corpus_sample < len(corpus)`:
 
 ```
 voyage-demos/
-├── .env                    # VOYAGE_API_KEY, MONGODB_URI (gitignored)
+├── .env                    # VOYAGE_API_KEY, MONGODB_URI, OPENAI_API_KEY
 ├── lib.py                  # shared registry/splitter/embedding helpers/constants
 ├── lib_metrics.py          # IR metrics: P@K, R@K, NDCG@K, MRR, AP/MAP
-├── retrieve.py             # vector / text / hybrid (RRF) retrieval
+├── retrieve.py             # vector / text / hybrid; multi_query_retrieve
+├── llm_client.py           # thin OpenAI wrapper (lazy-imported)
+├── query_rewriter.py       # none / hyde / multi / decompose
 ├── ingest.py               # builds vector + text indexes per dataset
-├── query.py                # CLI with --mode vector|text|hybrid
-├── test_harness.py         # all dataset × mode combos; charts; --report
+├── query.py                # CLI with --mode and --rewriter
+├── test_harness.py         # dataset × mode × rewriter; charts; --report
 ├── README.md               # user-facing docs
 └── CLAUDE.md               # this file
 ```

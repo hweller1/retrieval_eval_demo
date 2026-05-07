@@ -35,7 +35,8 @@ from lib import (
 from lib_metrics import (
     METRIC_KS, aggregate_metrics, compute_query_metrics, format_summary,
 )
-from retrieve import MODES, retrieve
+from retrieve import MODES, retrieve, multi_query_retrieve
+from query_rewriter import REWRITERS, DEFAULT_REWRITER, rewrite
 
 DEFAULT_MODE = "hybrid"
 
@@ -53,6 +54,7 @@ class QueryResult:
 class RunResult:
     dataset: str
     mode: str
+    rewriter: str
     num_queries: int
     chunks_in_collection: int
     per_query: list[QueryResult]
@@ -79,16 +81,19 @@ def query(
     dataset: str,
     num_queries: int = DEFAULT_QUERIES,
     mode: str = DEFAULT_MODE,
+    rewriter: str = DEFAULT_REWRITER,
     verbose: bool = True,
 ) -> RunResult:
     """
-    Run `num_queries` queries against the ingested collection in `mode` and
-    return a RunResult with per-query and aggregate metrics. When verbose,
-    also prints results.
+    Run `num_queries` queries against the ingested collection in `mode`,
+    optionally applying a query `rewriter` first. Returns a RunResult with
+    per-query and aggregate metrics. When verbose, also prints results.
     """
     require_credentials()
     if mode not in MODES:
         raise SystemExit(f"unknown --mode '{mode}' (expected one of {', '.join(MODES)})")
+    if rewriter not in REWRITERS:
+        raise SystemExit(f"unknown --rewriter '{rewriter}' (expected one of {', '.join(REWRITERS)})")
 
     import voyageai
     import pymongo
@@ -96,7 +101,7 @@ def query(
     coll_name = collection_name(dataset)
 
     if verbose:
-        header(f"Query  ×  {dataset}  ×  mode={mode}")
+        header(f"Query  ×  {dataset}  ×  mode={mode}  ×  rewriter={rewriter}")
         print(f"  Doc embedding   : {MODEL}")
         print(f"  Query embedding : {QUERY_MODEL}")
         print(f"  Collection      : {DB_NAME}.{coll_name}")
@@ -123,15 +128,26 @@ def query(
     if verbose:
         print(f"  Running {len(chosen_qids)} queries (of {len(queries):,} total) …")
 
-    # Vector mode needs a query embedding; text mode does not. Always compute
-    # if the mode might use it (vector or hybrid) so we don't branch later.
+    # ── Apply rewriter to each query (yields list[str] per original query) ──
+    raw_query_texts = [queries[qid] for qid in chosen_qids]
+    rewrites_per_query: list[list[str]] = [rewrite(rewriter, t) for t in raw_query_texts]
+
+    # ── Embed all rewrites in one batched call (vector / hybrid only) ───────
     needs_vector = mode in ("vector", "hybrid")
-    query_texts = [queries[qid] for qid in chosen_qids]
-    if needs_vector:
+    flat_texts = [t for sub in rewrites_per_query for t in sub]
+    if needs_vector and flat_texts:
         voyage = voyageai.Client(api_key=VOYAGE_API_KEY, base_url=MONGODB_BASE_URL)
-        query_vecs = embed_queries(voyage, query_texts)
+        flat_vecs = embed_queries(voyage, flat_texts)
     else:
-        query_vecs = [None] * len(query_texts)
+        flat_vecs = [None] * len(flat_texts)
+
+    # Re-group vectors back per original query
+    vecs_per_query: list[list[list[float] | None]] = []
+    cursor = 0
+    for sub in rewrites_per_query:
+        n = len(sub)
+        vecs_per_query.append(flat_vecs[cursor : cursor + n])
+        cursor += n
 
     if verbose:
         header("Results")
@@ -139,11 +155,14 @@ def query(
     per_query: list[QueryResult] = []
     top_n = max(METRIC_KS)
 
-    for qid, q_text, q_vec in zip(chosen_qids, query_texts, query_vecs):
+    for qid, original_text, sub_texts, sub_vecs in zip(
+        chosen_qids, raw_query_texts, rewrites_per_query, vecs_per_query
+    ):
         qrel = qrels.get(qid, {})
         relevant_set = {did for did, s in qrel.items() if s > 0}
 
-        ranked_rows = retrieve(mode, coll, q_vec, q_text, top_k=top_n)
+        sub_queries = list(zip(sub_vecs, sub_texts))
+        ranked_rows = multi_query_retrieve(mode, coll, sub_queries, top_k=top_n)
         ranked_ids  = [r["doc_id"] for r in ranked_rows]
 
         metrics = compute_query_metrics(ranked_ids, qrel)
@@ -152,7 +171,7 @@ def query(
             row["_relevant"] = row["doc_id"] in relevant_set
 
         qr = QueryResult(
-            qid=qid, text=q_text,
+            qid=qid, text=original_text,
             relevant_count=len(relevant_set),
             metrics=metrics,
             top_docs=ranked_rows[:TOP_K],
@@ -161,6 +180,9 @@ def query(
 
         if verbose:
             _print_query_block(qr)
+            if rewriter != "none" and len(sub_texts) > 0:
+                print(f"        ↳ rewriter produced {len(sub_texts)} text(s); "
+                      f"first: \"{sub_texts[0][:80]}\"")
 
     aggregate = aggregate_metrics([qr.metrics for qr in per_query])
 
@@ -168,6 +190,7 @@ def query(
         header("Summary")
         print(f"  Dataset           : {dataset}")
         print(f"  Mode              : {mode}")
+        print(f"  Rewriter          : {rewriter}")
         print(f"  Queries evaluated : {len(chosen_qids)}")
         print()
         print(f"  {format_summary(aggregate)}")
@@ -178,6 +201,7 @@ def query(
     return RunResult(
         dataset=dataset,
         mode=mode,
+        rewriter=rewriter,
         num_queries=len(chosen_qids),
         chunks_in_collection=count,
         per_query=per_query,
@@ -196,6 +220,9 @@ def main() -> None:
                    help="print supported BEIR datasets and exit")
     p.add_argument("--mode", choices=MODES, default=DEFAULT_MODE,
                    help=f"retrieval mode (default: {DEFAULT_MODE})")
+    p.add_argument("--rewriter", choices=REWRITERS, default=DEFAULT_REWRITER,
+                   help=f"query rewriter (default: {DEFAULT_REWRITER}; "
+                        "anything other than 'none' requires OPENAI_API_KEY)")
     p.add_argument("--num-queries", type=int, default=DEFAULT_QUERIES,
                    help=f"how many queries to run (default: {DEFAULT_QUERIES})")
     args = p.parse_args()
@@ -206,7 +233,8 @@ def main() -> None:
     if not args.dataset:
         p.error("dataset is required (or pass --list to see supported datasets)")
 
-    query(args.dataset, num_queries=args.num_queries, mode=args.mode)
+    query(args.dataset, num_queries=args.num_queries,
+          mode=args.mode, rewriter=args.rewriter)
 
 
 if __name__ == "__main__":

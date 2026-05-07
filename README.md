@@ -16,16 +16,18 @@ BEIR dataset → recursive split → /v1/contextualizedembeddings → MongoDB �
 Both credentials come from a single MongoDB Atlas account — **no separate
 Voyage AI account required**.
 
-| Variable | Where to get it |
-|---|---|
-| `VOYAGE_API_KEY` | Atlas UI → your project → **AI Models** → **API Keys** → "Create API Key". The key starts with `al-`. |
-| `MONGODB_URI` | Atlas UI → **Database** → "Connect" → "Drivers" → copy the `mongodb+srv://...` connection string and substitute your DB user's password. |
+| Variable | Where to get it | Required for |
+|---|---|---|
+| `VOYAGE_API_KEY` | Atlas UI → your project → **AI Models** → **API Keys** → "Create API Key". The key starts with `al-`. | All retrieval modes |
+| `MONGODB_URI` | Atlas UI → **Database** → "Connect" → "Drivers" → copy the `mongodb+srv://...` connection string and substitute your DB user's password. | All retrieval modes |
+| `OPENAI_API_KEY` | platform.openai.com → API Keys. | Optional — only needed for LLM-driven query rewriters (`hyde`, `multi`, `decompose`). |
 
-Both go in `.env`:
+All three go in `.env`:
 
 ```bash
 VOYAGE_API_KEY=al-...
 MONGODB_URI=mongodb+srv://<user>:<password>@<cluster>.mongodb.net/?retryWrites=true&w=majority
+OPENAI_API_KEY=sk-...   # optional
 ```
 
 > **Atlas prerequisites**
@@ -122,6 +124,22 @@ collection:
 `ingest.py` builds **both** indexes per dataset, so all three modes
 are available without re-ingesting.
 
+**Four query rewriters** can be layered on top of any mode (`--rewriter`):
+
+| Rewriter | What the LLM does | When it helps |
+|---|---|---|
+| `none` | passthrough — no LLM call | always available; the baseline |
+| `hyde` | drafts a hypothetical passage that would answer the query, embed that instead | short / abstract queries where vector embedding of the raw query underspecifies the search |
+| `multi` | produces 3 paraphrases of the query; results from all 4 are RRF-fused | vocabulary mismatch between query and corpus |
+| `decompose` | breaks a complex query into 2-4 sub-questions; each retrieves separately and gets fused | multi-hop or compound questions |
+
+```bash
+python3 query.py touche2020 --mode hybrid --rewriter hyde
+python3 query.py scifact --rewriter multi --num-queries 10
+```
+
+All rewriters except `none` require `OPENAI_API_KEY`.
+
 Each mode returns results deduplicated to one chunk per parent document
 and scores them against the official qrels.
 
@@ -145,13 +163,14 @@ python3 test_harness.py --quick                       # 3 small datasets, all 3 
 python3 test_harness.py                                # all 8 datasets, all 3 modes
 python3 test_harness.py --datasets scifact fiqa        # specific datasets
 python3 test_harness.py --modes vector hybrid          # subset of modes
-python3 test_harness.py --sample 500 --num-queries 10
-python3 test_harness.py --quick --report report.md     # also write a markdown comparison
+python3 test_harness.py --rewriters none hyde multi    # compare rewriters
+python3 test_harness.py --quick --report report.md     # markdown comparison
 ```
 
-For each (dataset × mode) the harness runs ingest once and queries
-three times (one per mode), then prints a Δ-vs-vector table and per-metric
-comparison charts.
+The harness runs every `dataset × mode × rewriter` combination, ingesting
+once per dataset, then prints a Δ-vs-baseline table and per-metric ASCII
+bar charts. By default `--rewriters` is just `none`, preserving the pure
+mode comparison; pass multiple rewriters to add the rewriting axis.
 
 Output has three parts: a per-dataset summary table, ASCII bar charts
 comparing each metric across datasets, and an optional Markdown file
