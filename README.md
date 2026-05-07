@@ -29,14 +29,12 @@ MONGODB_URI=mongodb+srv://<user>:<password>@<cluster>.mongodb.net/?retryWrites=t
 ```
 
 > **Atlas prerequisites**
-> - A cluster (M0 free tier works fine for the demo)
+> - A cluster (M0 free tier works fine)
 > - A database user with read/write access on `voyage_context_demo` (or admin)
 > - Your IP allowlisted under **Network Access** (or `0.0.0.0/0` for testing)
 > - The Voyage AI add-on enabled for the project so `AI Models` appears in the sidebar
 
 ## Install
-
-The project is single-file Python with a few pip dependencies.
 
 ```bash
 pip3 install voyageai pymongo python-dotenv requests beir
@@ -44,12 +42,28 @@ pip3 install voyageai pymongo python-dotenv requests beir
 #   pip3 install --break-system-packages ...
 ```
 
+## Layout
+
+```
+voyage-demos/
+├── .env              # VOYAGE_API_KEY, MONGODB_URI
+├── lib.py            # shared: dataset registry, splitter, embedding helpers
+├── ingest.py         # CLI: ingest a BEIR dataset into MongoDB
+├── query.py          # CLI: run queries against an ingested dataset
+├── test_harness.py   # validates ingest + query for every dataset
+├── README.md
+└── CLAUDE.md         # working notes for AI agents
+```
+
+The two scripts are independently runnable and share their dataset
+registry, splitter, and embedding helpers via `lib.py`.
+
 ## Usage
 
 ### See available datasets
 
 ```bash
-python3 demo.py --list
+python3 ingest.py --list      # or:  python3 query.py --list
 ```
 
 ```
@@ -68,8 +82,8 @@ Supported BEIR datasets
 ### Ingest a dataset
 
 ```bash
-python3 demo.py --ingest touche2020              # default sample: 2000 docs
-python3 demo.py --ingest scifact --sample 500    # smaller for fast iteration
+python3 ingest.py touche2020              # default sample: 2000 docs
+python3 ingest.py scifact --sample 500    # smaller for fast iteration
 ```
 
 This step:
@@ -89,8 +103,8 @@ Different datasets coexist in their own collections.
 ### Run queries
 
 ```bash
-python3 demo.py --query touche2020                  # 5 queries (default)
-python3 demo.py --query scifact --num-queries 20    # more queries
+python3 query.py touche2020                  # 5 queries (default)
+python3 query.py scifact --num-queries 20    # more queries
 ```
 
 Queries are embedded with `voyage-3-large` (same generation as
@@ -109,7 +123,7 @@ A summary block at the end reports mean P@5 and MAP.
 ## Test harness
 
 `test_harness.py` validates the full pipeline against every supported
-dataset. It runs `--ingest` then `--query` for each, checks MongoDB state,
+dataset. It runs `ingest` then `query` for each, checks MongoDB state,
 parses the metrics, and prints a pass/fail table.
 
 ```bash
@@ -150,17 +164,6 @@ The harness exits non-zero if any dataset fails, so it's CI-friendly.
 Same downstream workflow — the resulting vectors plug into MongoDB Vector
 Search like any other 1024-dimensional embedding.
 
-## File layout
-
-```
-voyage-context-3-testing/
-├── .env                  # VOYAGE_API_KEY, MONGODB_URI
-├── demo.py               # CLI: --list / --ingest / --query
-├── test_harness.py       # validates ingest + query for all datasets
-├── README.md             # this file
-└── CLAUDE.md             # working notes for AI agents
-```
-
 ## Troubleshooting
 
 **`Authentication failed` (MongoDB)** — your `MONGODB_URI` credentials are
@@ -169,15 +172,15 @@ must be percent-encoded (e.g. `@` → `%40`).
 
 **`Model voyage-context-3 is not supported`** — you're hitting the standard
 embeddings endpoint. The model only works on `/v1/contextualizedembeddings`.
-The demo handles this correctly — make sure you're not calling it
+The scripts handle this correctly — make sure you're not calling it
 yourself via `voyage.embed(model="voyage-context-3", ...)`.
 
 **Index never becomes queryable** — Atlas vector indexes can take 30–60s
 on a fresh collection. The script waits up to 150s; if it gives up you
-can re-run `--query` later when the index is ready (check Atlas UI).
+can re-run `query.py` later when the index is ready (check Atlas UI).
 
-**`Collection ... is empty`** — you ran `--query` before `--ingest`, or
-the previous ingest used a different collection name. Re-ingest.
+**`Collection ... is empty`** — you ran `query.py` before `ingest.py`, or
+a previous ingest used a different collection name. Re-ingest.
 
 ## License / attribution
 

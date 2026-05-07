@@ -1,22 +1,19 @@
 """
-End-to-end test harness for demo.py
-====================================
+End-to-end test harness for ingest.py + query.py
+=================================================
 
-Validates that --ingest and --query work for every supported BEIR dataset:
+For each supported BEIR dataset:
+  1. Calls ingest.ingest(dataset, corpus_sample=SAMPLE)
+  2. Verifies the MongoDB collection is populated and the vector index exists
+  3. Calls query.query(dataset, num_queries=NUM_QUERIES)
+  4. Parses metrics from the captured stdout and asserts at least one hit
 
-  1. Calls demo.cmd_ingest(dataset, corpus_sample=SAMPLE) for each dataset.
-  2. Calls demo.cmd_query(dataset, num_queries=NUM_QUERIES).
-  3. Verifies each step produced the expected MongoDB state and returned
-     non-trivial retrieval metrics (at least one hit, MAP > 0).
-  4. Prints a PASS/FAIL summary table.
-
-Defaults are tuned for fast iteration (small sample, few queries) so the
-full suite finishes in a few minutes. Use --quick to test only the smallest
-datasets, or --datasets to limit the run.
+Defaults are tuned for fast iteration. Use --quick for the smallest datasets
+or --datasets to limit the run.
 
 Usage:
   python3 test_harness.py                    # all 8 datasets, sample=200
-  python3 test_harness.py --quick            # only the small datasets
+  python3 test_harness.py --quick            # 3 small datasets
   python3 test_harness.py --datasets scifact nfcorpus
   python3 test_harness.py --sample 500 --num-queries 10
 """
@@ -36,11 +33,12 @@ from dataclasses import dataclass
 os.environ.setdefault("TQDM_DISABLE", "1")
 os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
 
-import demo
-from demo import DATASETS, DB_NAME, INDEX_NAME, collection_name
+import lib
+import ingest as ingest_mod
+import query  as query_mod
+from lib import DATASETS, DB_NAME, INDEX_NAME, collection_name
 
 
-# Datasets considered "quick" — small corpora that download/ingest in seconds
 QUICK_DATASETS = ["scifact", "nfcorpus", "arguana"]
 
 
@@ -67,7 +65,7 @@ class DatasetResult:
 
 
 def parse_metrics(captured: str) -> tuple[float, float]:
-    """Pull MAP and Mean P@K from the demo's stdout."""
+    """Pull MAP and Mean P@K from query.py's stdout."""
     map_score, p_at_k = 0.0, 0.0
     for line in captured.splitlines():
         line = line.strip()
@@ -85,7 +83,6 @@ def parse_metrics(captured: str) -> tuple[float, float]:
 
 
 def run_stage(label: str, fn) -> tuple[StageResult, str]:
-    """Run fn() while capturing stdout. Returns (StageResult, captured_output)."""
     buf = io.StringIO()
     t0 = time.time()
     passed, detail = True, ""
@@ -103,24 +100,21 @@ def run_stage(label: str, fn) -> tuple[StageResult, str]:
 
 
 def verify_collection(dataset: str) -> tuple[int, bool, str]:
-    """Confirm the collection exists, has chunks, and the vector index is queryable."""
     import pymongo
-    if not demo.MONGODB_URI:
+    if not lib.MONGODB_URI:
         return 0, False, "MONGODB_URI not set"
 
-    client = pymongo.MongoClient(demo.MONGODB_URI)
+    client = pymongo.MongoClient(lib.MONGODB_URI)
     try:
         coll = client[DB_NAME][collection_name(dataset)]
         count = coll.estimated_document_count()
         if count == 0:
             return 0, False, "collection empty"
 
-        # Check at least one document has an embedding field
         sample = coll.find_one({"embedding": {"$exists": True}})
         if not sample:
             return count, False, "no embeddings stored"
 
-        # Check the index exists
         indexes = list(coll.list_search_indexes())
         if not any(idx["name"] == INDEX_NAME for idx in indexes):
             return count, False, f"index '{INDEX_NAME}' missing"
@@ -136,7 +130,7 @@ def run_dataset(dataset: str, sample: int, num_queries: int, verbose: bool) -> D
     # --- ingest ---
     print(f"    [ingest] sample={sample} …", end=" ", flush=True)
     ingest_result, ingest_output = run_stage(
-        "ingest", lambda: demo.cmd_ingest(dataset, corpus_sample=sample)
+        "ingest", lambda: ingest_mod.ingest(dataset, corpus_sample=sample)
     )
     print(f"{ingest_result.duration_s:.1f}s "
           f"{'PASS' if ingest_result.passed else 'FAIL'}")
@@ -159,7 +153,7 @@ def run_dataset(dataset: str, sample: int, num_queries: int, verbose: bool) -> D
     # --- query ---
     print(f"    [query]  num_queries={num_queries} …", end=" ", flush=True)
     query_result, query_output = run_stage(
-        "query", lambda: demo.cmd_query(dataset, num_queries=num_queries)
+        "query", lambda: query_mod.query(dataset, num_queries=num_queries)
     )
     map_score, p_at_k = parse_metrics(query_output)
     print(f"{query_result.duration_s:.1f}s "
@@ -171,7 +165,6 @@ def run_dataset(dataset: str, sample: int, num_queries: int, verbose: bool) -> D
         if verbose:
             print(query_output)
     elif map_score == 0.0 and p_at_k == 0.0:
-        # Sanity check: no relevant hits at all is suspicious
         query_result.passed = False
         query_result.detail = "MAP=0 and P@K=0 — no relevant docs retrieved"
         print(f"      ↳ {query_result.detail}")
@@ -210,7 +203,7 @@ def print_summary(results: list[DatasetResult]) -> None:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(description="End-to-end test harness for demo.py.")
+    p = argparse.ArgumentParser(description="End-to-end test harness for ingest.py + query.py.")
     p.add_argument("--datasets", nargs="+", choices=list(DATASETS.keys()),
                    help="subset of datasets to test (default: all)")
     p.add_argument("--quick", action="store_true",
@@ -220,7 +213,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--num-queries", type=int, default=3,
                    help="queries to run per dataset (default: 3)")
     p.add_argument("--verbose", action="store_true",
-                   help="print full demo output on failure")
+                   help="print full output on failure")
     return p
 
 

@@ -10,9 +10,12 @@ model) running through the **MongoDB-hosted Voyage AI endpoint**, evaluated
 against **BEIR** retrieval benchmarks with chunks stored in MongoDB Atlas
 Vector Search.
 
-Two entry points:
-- `demo.py` — CLI with `--list / --ingest / --query`
-- `test_harness.py` — end-to-end validation across all supported BEIR datasets
+Three entry points and a shared library:
+- `lib.py` — shared dataset registry, splitter, embedding helpers, constants
+- `ingest.py` — CLI: `python3 ingest.py <dataset> [--sample N]` (also `--list`)
+- `query.py` — CLI: `python3 query.py <dataset> [--num-queries N]` (also `--list`)
+- `test_harness.py` — end-to-end validation across all supported BEIR datasets,
+  imports `ingest.ingest()` and `query.query()` directly
 
 ## Key facts you must not relearn
 
@@ -123,9 +126,11 @@ When `corpus_sample < len(corpus)`:
 ## File layout
 
 ```
-voyage-context-3-testing/
-├── .env                    # VOYAGE_API_KEY, MONGODB_URI (gitignored implicitly)
-├── demo.py                 # CLI: --list, --ingest, --query, --sample, --num-queries
+voyage-demos/
+├── .env                    # VOYAGE_API_KEY, MONGODB_URI (gitignored)
+├── lib.py                  # shared registry/splitter/embedding helpers/constants
+├── ingest.py               # CLI: ingest <dataset> [--sample N] [--list]
+├── query.py                # CLI: query  <dataset> [--num-queries N] [--list]
 ├── test_harness.py         # end-to-end validation across all BEIR datasets
 ├── README.md               # user-facing docs
 └── CLAUDE.md               # this file
@@ -134,20 +139,23 @@ voyage-context-3-testing/
 Datasets cache to `/tmp/beir_datasets/<folder>/` — first ingest of a
 dataset downloads it.
 
+`test_harness.py` imports `ingest.ingest` and `query.query` directly (no
+subprocess) so it can capture stdout cheaply and assert on metrics.
+
 ## Useful commands
 
 ```bash
-# List datasets
-python3 demo.py --list
+# List datasets (either script works)
+python3 ingest.py --list
 
 # Ingest one dataset (default sample 2000)
-python3 demo.py --ingest touche2020
+python3 ingest.py touche2020
 
 # Ingest with smaller sample for fast iteration
-python3 demo.py --ingest scifact --sample 200
+python3 ingest.py scifact --sample 200
 
 # Run queries (collection must exist)
-python3 demo.py --query touche2020 --num-queries 5
+python3 query.py touche2020 --num-queries 5
 
 # Smoke test: 3 small datasets, ~2 minutes
 python3 test_harness.py --quick --sample 100 --num-queries 3
