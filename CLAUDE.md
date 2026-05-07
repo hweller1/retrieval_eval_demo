@@ -208,6 +208,35 @@ python3 test_harness.py --sample 100 --num-queries 3
   Limits) is the source of truth for which models the user's project has
   access to.
 
+## What has been verified
+
+As of 2026-05-07, after Stages 1–3:
+
+- IR metrics math (P@K, R@K, NDCG@K, AP, MRR, MAP) checked against
+  hand-computed expected values, including BEIR-style graded relevance.
+- RRF math in `retrieve.multi_query_retrieve`: single-query passthrough,
+  multi-query fan-in, score summation when the same doc appears in
+  multiple sub-rankings. Verified d1 score == 1/61 + 1/61 ≈ 0.0328 in a
+  two-ranking overlap case.
+- Recursive splitter respects paragraph (`\n\n`) > line > sentence > word
+  > char fallback, and handles empty / short / no-separator inputs.
+- End-to-end smoke test: `scifact` × 3 modes × `none` rewriter — all PASS,
+  index creation correct, vector + text indexes both queryable.
+- Missing-`OPENAI_API_KEY` raises a clear actionable error from
+  `llm_client.complete()` instead of an obscure ImportError or 401.
+- `--list` works for both `ingest.py` and `query.py`; required-arg error
+  is informative.
+
+What has *not* been verified at run time (no harness coverage yet):
+
+- LLM rewriters (`hyde`, `multi`, `decompose`) end-to-end against real
+  OpenAI — needs `OPENAI_API_KEY` set in `.env`.
+- "Hybrid beats vector on ≥5/8 BEIR datasets" — needs a full sample run
+  (`test_harness.py --sample 1000+`); current 100-doc samples are too
+  small for the comparison to stabilize.
+- Stage 4–6 are unimplemented per the roadmap in
+  `~/.claude/plans/what-is-a-logical-staged-breeze.md`.
+
 ## When something breaks
 
 | Symptom | Likely cause |
