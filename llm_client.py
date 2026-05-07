@@ -11,6 +11,10 @@ from __future__ import annotations
 import os
 import threading
 
+from dotenv import load_dotenv
+
+load_dotenv()
+
 # Default model is the cheapest 4o-class model. Override per call when needed.
 DEFAULT_MODEL = "gpt-4o-mini"
 

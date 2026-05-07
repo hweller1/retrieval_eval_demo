@@ -35,11 +35,14 @@ from lib import (
 from lib_metrics import (
     METRIC_KS, aggregate_metrics, compute_query_metrics, format_summary,
 )
-from retrieve import MODES, retrieve, multi_query_retrieve
+from retrieve import MODES, DEFAULT_ALPHA, retrieve, multi_query_retrieve
 from query_rewriter import REWRITERS, DEFAULT_REWRITER, rewrite
 from rerank import rerank as rerank_rows
+import query_classifier
 
 DEFAULT_MODE       = "hybrid"
+ALPHA_MODES        = ("static", "dynamic")
+DEFAULT_ALPHA_MODE = "static"
 RERANK_CANDIDATES  = 50   # how many candidates to fetch from first-stage when reranking
 
 
@@ -86,6 +89,8 @@ def query(
     mode: str = DEFAULT_MODE,
     rewriter: str = DEFAULT_REWRITER,
     rerank: bool = False,
+    alpha: float = DEFAULT_ALPHA,
+    alpha_mode: str = DEFAULT_ALPHA_MODE,
     verbose: bool = True,
 ) -> RunResult:
     """
@@ -98,6 +103,8 @@ def query(
         raise SystemExit(f"unknown --mode '{mode}' (expected one of {', '.join(MODES)})")
     if rewriter not in REWRITERS:
         raise SystemExit(f"unknown --rewriter '{rewriter}' (expected one of {', '.join(REWRITERS)})")
+    if alpha_mode not in ALPHA_MODES:
+        raise SystemExit(f"unknown --alpha-mode '{alpha_mode}' (expected one of {', '.join(ALPHA_MODES)})")
 
     import voyageai
     import pymongo
@@ -138,8 +145,8 @@ def query(
     raw_query_texts = [queries[qid] for qid in chosen_qids]
     rewrites_per_query: list[list[str]] = [rewrite(rewriter, t) for t in raw_query_texts]
 
-    # ── Embed all rewrites in one batched call (vector / hybrid only) ───────
-    needs_vector = mode in ("vector", "hybrid")
+    # ── Embed all rewrites in one batched call (any mode that uses vectors) ──
+    needs_vector = mode in ("vector", "hybrid", "comb_sum")
     flat_texts = [t for sub in rewrites_per_query for t in sub]
     if needs_vector and flat_texts:
         voyage = voyageai.Client(api_key=VOYAGE_API_KEY, base_url=MONGODB_BASE_URL)
@@ -164,14 +171,28 @@ def query(
     # so the cross-encoder has room to reorder useful misses up.
     first_stage_k = RERANK_CANDIDATES if rerank else top_n
 
-    for qid, original_text, sub_texts, sub_vecs in zip(
-        chosen_qids, raw_query_texts, rewrites_per_query, vecs_per_query
+    # If alpha_mode == "dynamic" and the mode actually uses alpha, ask the
+    # LLM to pick a per-query alpha based on query characteristics. Modes
+    # like "vector" / "text" ignore alpha entirely so we skip the call.
+    use_dynamic_alpha = (
+        alpha_mode == "dynamic" and mode in ("hybrid", "comb_sum")
+    )
+    if use_dynamic_alpha:
+        per_query_alphas = query_classifier.predict_alphas(raw_query_texts)
+    else:
+        per_query_alphas = [alpha] * len(raw_query_texts)
+
+    for qid, original_text, sub_texts, sub_vecs, q_alpha in zip(
+        chosen_qids, raw_query_texts, rewrites_per_query, vecs_per_query,
+        per_query_alphas,
     ):
         qrel = qrels.get(qid, {})
         relevant_set = {did for did, s in qrel.items() if s > 0}
 
         sub_queries = list(zip(sub_vecs, sub_texts))
-        ranked_rows = multi_query_retrieve(mode, coll, sub_queries, top_k=first_stage_k)
+        ranked_rows = multi_query_retrieve(
+            mode, coll, sub_queries, top_k=first_stage_k, alpha=q_alpha,
+        )
 
         if rerank and ranked_rows:
             # Cross-encode against the original (un-rewritten) query for fairness
@@ -194,6 +215,8 @@ def query(
 
         if verbose:
             _print_query_block(qr)
+            if use_dynamic_alpha:
+                print(f"        ↳ classifier α={q_alpha:.2f}")
             if rewriter != "none" and len(sub_texts) > 0:
                 print(f"        ↳ rewriter produced {len(sub_texts)} text(s); "
                       f"first: \"{sub_texts[0][:80]}\"")
@@ -240,6 +263,15 @@ def main() -> None:
                         "anything other than 'none' requires OPENAI_API_KEY)")
     p.add_argument("--rerank", action="store_true",
                    help="apply Voyage rerank-2.5 cross-encoder as a second stage")
+    p.add_argument("--alpha", type=float, default=DEFAULT_ALPHA,
+                   help="vector weight for hybrid/comb_sum fusion (0=text only, "
+                        f"1=vector only, 0.5=balanced; default: {DEFAULT_ALPHA}). "
+                        "Ignored when --alpha-mode is dynamic.")
+    p.add_argument("--alpha-mode", choices=ALPHA_MODES, default=DEFAULT_ALPHA_MODE,
+                   help="how to choose alpha per query: 'static' uses --alpha for "
+                        "every query; 'dynamic' has a cheap LLM (gpt-4o-mini) "
+                        "predict alpha per query based on its characteristics. "
+                        f"(default: {DEFAULT_ALPHA_MODE}; dynamic requires OPENAI_API_KEY)")
     p.add_argument("--num-queries", type=int, default=DEFAULT_QUERIES,
                    help=f"how many queries to run (default: {DEFAULT_QUERIES})")
     args = p.parse_args()
@@ -251,7 +283,8 @@ def main() -> None:
         p.error("dataset is required (or pass --list to see supported datasets)")
 
     query(args.dataset, num_queries=args.num_queries,
-          mode=args.mode, rewriter=args.rewriter, rerank=args.rerank)
+          mode=args.mode, rewriter=args.rewriter, rerank=args.rerank,
+          alpha=args.alpha, alpha_mode=args.alpha_mode)
 
 
 if __name__ == "__main__":
