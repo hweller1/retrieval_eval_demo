@@ -16,16 +16,18 @@ Three entry points, a shared library, a metrics module, and a retrieval module:
   `(ranked_doc_ids, relevant_set_or_qrels_dict)`. `compute_query_metrics`
   returns a dict; `aggregate_metrics` reduces to MAP / mean of others.
   `METRIC_KS = (5, 10)` is the source of truth for which Ks are reported.
-- `retrieve.py` — `vector_only`, `text_only`, `hybrid` (weighted RRF
-  with `alpha ∈ [0, 1]` for vector/text weighting). `MODES =
-  ("vector", "text", "hybrid")`. `DEFAULT_CANDIDATES = 100` per
-  first-stage. `retrieve(mode, …, alpha)` dispatches and
-  `multi_query_retrieve(...)` fuses rewritten queries via RRF.
-  Constants `INDEX_NAME` (from `lib`) and `TEXT_INDEX_NAME` here.
-  Note: an earlier version included a `comb_sum` mode (CombSUM /
-  Reciprocal Score Fusion). Removed because Atlas 8.3+ ships native
-  Relative Score Fusion via `$rankFusion`; duplicating it client-side
-  wasn't worth the maintenance.
+- `retrieve.py` — `vector_only`, `text_only`, `hybrid`. The hybrid
+  uses Atlas's native `$rankFusion` operator (8.0+) for server-side
+  weighted RRF, passing `weights={vector: alpha, text: 1-alpha}` so a
+  single `alpha ∈ [0, 1]` controls the blend. `MODES = ("vector",
+  "text", "hybrid")`. `DEFAULT_CANDIDATES = 100` per first-stage.
+  `retrieve(mode, …, alpha)` dispatches; `multi_query_retrieve(...)`
+  is still client-side because it RRFs across multiple *rewritten
+  queries* of the same mode (rankFusion fuses pipelines, not query
+  variants). Constants `INDEX_NAME` (from `lib`) and `TEXT_INDEX_NAME`
+  here. Note: an earlier client-side `comb_sum` mode was removed —
+  Atlas 8.3+ also ships native Relative Score Fusion via `$rankFusion`
+  with sigmoid normalization, so we don't reimplement it.
 - `llm_client.py` — thin OpenAI wrapper. Lazy-imports the `openai`
   package and only fails on missing `OPENAI_API_KEY` when actually
   invoked. Default model is `gpt-4o-mini`.

@@ -66,7 +66,7 @@ def text_only(coll, query_text: str, top_k: int = 10) -> list[dict]:
     return _dedup_by_doc_id(coll.aggregate(pipeline))[:top_k]
 
 
-# ── Hybrid: weighted RRF ─────────────────────────────────────────────────────
+# ── Hybrid: native $rankFusion (Atlas 8.0+) ─────────────────────────────────
 
 # Default first-stage candidate depth per mode. Bumped to 100 (was 40) to
 # give fusion more material to work with — RRF can't recover relevant docs
@@ -80,36 +80,58 @@ def hybrid(
     query_text: str,
     top_k: int = 10,
     alpha: float = 0.5,
-    k_rrf: int = 60,
     candidates_per_mode: int | None = None,
 ) -> list[dict]:
     """
-    Weighted Reciprocal Rank Fusion of vector + text rankings.
+    Server-side Reciprocal Rank Fusion via $rankFusion (Atlas 8.0+).
 
-    score(d) = alpha * 1/(k_rrf + rank_vec(d))
-             + (1-alpha) * 1/(k_rrf + rank_text(d))
+    Atlas computes:
+        RRFscore(d) = Σ (w_i / (60 + rank_i(d)))
+    across each input pipeline, where w_i is the per-pipeline weight.
+    We pass weights={vector: alpha, text: 1-alpha} so alpha controls the
+    vector/text balance (alpha=1.0 → vector only; alpha=0.0 → text only).
 
-    alpha=1.0 → vector only, alpha=0.0 → text only, alpha=0.5 → standard
-    Cormack-2009 RRF. With voyage-context-3 vectors typically beating BM25,
-    favoring vector (alpha > 0.5) often wins on semantic-heavy datasets.
+    Because the pipeline restrictions on $rankFusion forbid post-retrieval
+    projections inside its selection pipelines, we run the fusion over
+    chunks then deduplicate to one chunk per parent doc client-side.
     """
     n = candidates_per_mode or DEFAULT_CANDIDATES
-    vec_rows  = vector_only(coll, q_vec,      top_k=n)
-    text_rows = text_only  (coll, query_text, top_k=n)
 
-    scores: dict[str, float] = defaultdict(float)
-    rows_by_id: dict[str, dict] = {}
+    # $rankFusion requires non-zero weights; nudge edge cases up slightly so
+    # we don't trigger validation errors at alpha=0 or 1 while still letting
+    # the dominant signal effectively own the result.
+    EPS = 1e-3
+    w_vec  = max(alpha, EPS)
+    w_text = max(1.0 - alpha, EPS)
 
-    for rank, row in enumerate(vec_rows, 1):
-        scores[row["doc_id"]] += alpha * (1.0 / (k_rrf + rank))
-        rows_by_id.setdefault(row["doc_id"], row)
-    for rank, row in enumerate(text_rows, 1):
-        scores[row["doc_id"]] += (1.0 - alpha) * (1.0 / (k_rrf + rank))
-        rows_by_id.setdefault(row["doc_id"], row)
-
-    fused = [{**rows_by_id[did], "score": s} for did, s in scores.items()]
-    fused.sort(key=lambda r: r["score"], reverse=True)
-    return fused[:top_k]
+    pipeline = [
+        {"$rankFusion": {
+            "input": {
+                "pipelines": {
+                    "vector": [
+                        {"$vectorSearch": {
+                            "index"        : INDEX_NAME,
+                            "path"         : "embedding",
+                            "queryVector"  : q_vec,
+                            "numCandidates": n * 4,
+                            "limit"        : n,
+                        }},
+                    ],
+                    "text": [
+                        {"$search": {
+                            "index": TEXT_INDEX_NAME,
+                            "text" : {"path": "text", "query": query_text},
+                        }},
+                        {"$limit": n},
+                    ],
+                },
+            },
+            "combination": {"weights": {"vector": w_vec, "text": w_text}},
+        }},
+        {"$addFields": {"score": {"$meta": "score"}}},
+        {"$limit": top_k * 4},
+    ]
+    return _dedup_by_doc_id(coll.aggregate(pipeline))[:top_k]
 
 
 # ── Mode dispatch ────────────────────────────────────────────────────────────
