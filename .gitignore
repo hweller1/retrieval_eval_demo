@@ -12,5 +12,11 @@ venv/
 .DS_Store
 .idea/
 .vscode/
+.claude/
+
+# LLM judge cache (regenerated on demand; can be 4MB+)
+judge_cache.json
+judge_cache.json.bak
+judge_cache.json.tmp
 
 /tmp/

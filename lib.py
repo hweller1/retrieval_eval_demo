@@ -88,6 +88,13 @@ DATASETS: dict[str, dict] = {
         "split"      : "test",
         "description": "Duplicate question retrieval (10k queries / 523k docs)",
     },
+    # Non-BEIR datasets use a `loader_fn` instead of `url` + `folder`.
+    # The loader returns (corpus, queries, qrels, info) just like BEIR.
+    "sec-10k": {
+        "loader"     : "data_loaders.sec_10k:load",
+        "split"      : "test",
+        "description": "SEC 10-K filings — 15 US tech companies, FY2021-2024 (300 trader queries, no qrels — uses LLM judge)",
+    },
 }
 
 
@@ -162,37 +169,151 @@ def split_text(text: str, chunk_size: int = CHUNK_SIZE, chunk_overlap: int = CHU
 
 # ── Embedding helpers ─────────────────────────────────────────────────────────
 
+# voyage-context-3 hard limit is 32,000 tokens per inner-list. We approximate
+# tokens as chars/4 (cl100k tokenizer averages ~3.7 chars/token on English
+# prose; we use 4 to be conservative). Cap at 28k tokens (≈110k chars) per
+# inner-list to leave headroom for the doc-anchor and for tokenizer slack.
+MAX_CHARS_PER_INNER_LIST = 100_000
+
+
+def _split_chunks_into_segments(
+    full_doc: str, chunks: list[str], max_chars: int = MAX_CHARS_PER_INNER_LIST,
+) -> list[list[str]]:
+    """
+    Build inner-lists for one document.
+
+    If the full doc + all its chunks fit under `max_chars`, return a single
+    inner-list of [full_doc, *chunks] — the full doc anchors all chunks.
+
+    Otherwise we drop the anchor and split chunks into segments that each
+    fit. Within a segment the chunks still cross-context against each
+    other (the model's job), they just don't see the whole doc.
+    """
+    chunks_chars = sum(len(c) for c in chunks)
+    if len(full_doc) + chunks_chars + 64 <= max_chars:
+        return [[full_doc, *chunks]]
+
+    segments: list[list[str]] = []
+    current: list[str] = []
+    current_chars = 0
+    for c in chunks:
+        if current and current_chars + len(c) > max_chars:
+            segments.append(current)
+            current = []
+            current_chars = 0
+        current.append(c)
+        current_chars += len(c)
+    if current:
+        segments.append(current)
+    return segments
+
+
 def embed_contextualized(
     doc_chunks: list[tuple[str, list[str]]],
     batch_docs: int = EMBED_BATCH_DOCS,
+    max_chars_per_batch: int = 400_000,
 ) -> list[list[float]]:
     """
     POST /v1/contextualizedembeddings.
-    Prepends the full document text to each inner list so chunks are embedded
-    with full-document context. Skips the document anchor in the response.
+
+    Each (full_doc, chunks) pair is converted into one or more inner-lists:
+      - If full_doc + chunks fit in 28k tokens → one inner-list with full_doc
+        as the contextual anchor; we skip that anchor in the response.
+      - If too big → split chunks into anchorless segments that each fit.
+
+    Adaptive request batching: respects a soft char cap per HTTP call to
+    stay under the 6M TPM rate limit. Retries with exponential backoff on
+    429 / 5xx.
+
+    Returns chunk embeddings in the same order as the input `chunks`,
+    flattened across all docs.
     """
+    import time as _time
+
     url     = f"{MONGODB_BASE_URL}/contextualizedembeddings"
     headers = {"Authorization": f"Bearer {VOYAGE_API_KEY}", "Content-Type": "application/json"}
-    total   = len(doc_chunks)
-    all_vecs: list[list[float]] = []
 
-    for batch_start in range(0, total, batch_docs):
-        batch  = doc_chunks[batch_start : batch_start + batch_docs]
-        inputs = [[full_doc] + chunks for full_doc, chunks in batch]
+    # ── Pre-flatten: build (inner_list, n_chunks_in_it, has_anchor) records.
+    # Each doc may produce multiple records.
+    flat: list[tuple[list[str], int, bool, int]] = []  # (inner, n_chunks, has_anchor, doc_idx)
+    chunks_per_doc: list[int] = []
+    for di, (full_doc, chunks) in enumerate(doc_chunks):
+        chunks_per_doc.append(len(chunks))
+        segments = _split_chunks_into_segments(full_doc, chunks)
+        if len(segments) == 1 and segments[0] and segments[0][0] is full_doc:
+            # one segment with the full-doc anchor at index 0
+            flat.append((segments[0], len(chunks), True, di))
+        else:
+            for seg in segments:
+                flat.append((seg, len(seg), False, di))
+
+    # Pre-allocate output list keyed by doc index then chunk position
+    out_per_doc: list[list[list[float] | None]] = [
+        [None] * n for n in chunks_per_doc
+    ]
+    next_chunk_pos: list[int] = [0] * len(doc_chunks)
+
+    total_records = len(flat)
+
+    def _record_chars(rec) -> int:
+        return sum(len(s) for s in rec[0])
+
+    i = 0
+    while i < total_records:
+        # Greedily grow batch by chars + doc-count cap (here doc-count refers
+        # to inner-lists, not original docs)
+        end = i
+        batch_chars = 0
+        while end < total_records and (end - i) < batch_docs:
+            rc = _record_chars(flat[end])
+            if batch_chars + rc > max_chars_per_batch and end > i:
+                break
+            batch_chars += rc
+            end += 1
+        batch = flat[i:end]
+        inputs = [rec[0] for rec in batch]
         payload = {"model": MODEL, "inputs": inputs}
-        response = requests.post(url, json=payload, headers=headers, timeout=120)
-        response.raise_for_status()
+
+        for attempt in range(6):
+            response = requests.post(url, json=payload, headers=headers, timeout=180)
+            if response.status_code == 200:
+                break
+            if response.status_code in (429, 500, 502, 503, 504) and attempt < 5:
+                wait = 2 ** attempt + 1
+                _time.sleep(wait)
+                continue
+            try:
+                detail = response.json()
+            except Exception:
+                detail = response.text[:500]
+            raise requests.HTTPError(
+                f"{response.status_code} {response.reason} for {url}\nBody: {detail}"
+            )
+        else:
+            response.raise_for_status()
+
         result = response.json()
+        for rec_offset, doc_group in enumerate(result["data"]):
+            inner_list, n_chunks, has_anchor, doc_idx = batch[rec_offset]
+            items = sorted(doc_group["data"], key=lambda x: x["index"])
+            chunk_items = items[1:] if has_anchor else items
+            for item in chunk_items:
+                pos = next_chunk_pos[doc_idx]
+                out_per_doc[doc_idx][pos] = item["embedding"]
+                next_chunk_pos[doc_idx] += 1
 
-        for doc_group in result["data"]:
-            chunk_items = sorted(doc_group["data"], key=lambda x: x["index"])[1:]
-            all_vecs.extend(item["embedding"] for item in chunk_items)
-
-        done = min(batch_start + batch_docs, total)
-        print(f"    {done:>{len(str(total))}}/{total} documents contextualized …", end="\r")
+        i = end
+        print(f"    {i:>{len(str(total_records))}}/{total_records} segments embedded …", end="\r")
 
     print()
-    return all_vecs
+
+    # Flatten in original doc order
+    flat_vecs: list[list[float]] = []
+    for vecs in out_per_doc:
+        if any(v is None for v in vecs):
+            raise RuntimeError("internal error: some chunks did not receive embeddings")
+        flat_vecs.extend(vecs)
+    return flat_vecs
 
 
 def embed_queries(client, texts: list[str]) -> list[list[float]]:
@@ -203,15 +324,30 @@ def embed_queries(client, texts: list[str]) -> list[list[float]]:
 # ── Dataset loader ───────────────────────────────────────────────────────────
 
 def load_beir_dataset(name: str):
-    """Download (if needed) and load a BEIR dataset. Returns (corpus, queries, qrels, info)."""
+    """Load a dataset by registry name. Returns (corpus, queries, qrels, info).
+
+    Two backends are supported:
+      - BEIR archive: entry has 'url' + 'folder' (downloaded + unzipped via beir).
+      - Custom loader: entry has 'loader' = "module.path:func_name" — we
+        import the function and call it. Used for non-BEIR sources like
+        SEC 10-Ks where the corpus is fetched live and qrels don't exist.
+    """
     if name not in DATASETS:
         raise SystemExit(
             f"Unknown dataset '{name}'. Run `python3 ingest.py --list` to see options."
         )
+    info = DATASETS[name]
 
-    info      = DATASETS[name]
+    # Custom loader path
+    if "loader" in info:
+        import importlib
+        module_path, func_name = info["loader"].split(":")
+        mod = importlib.import_module(module_path)
+        load_fn = getattr(mod, func_name)
+        return load_fn()
+
+    # BEIR archive path
     data_path = os.path.join(DATA_DIR, info["folder"])
-
     from beir.datasets.data_loader import GenericDataLoader
     from beir import util
 
