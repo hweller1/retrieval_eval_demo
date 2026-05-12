@@ -252,7 +252,22 @@ def nb01() -> list[dict]:
         Let's pull one query and look at it.
         """),
         code("""
-        sample_qid    = next(iter(queries))
+        from retrieve import text_only
+
+        # Pick the first query whose BM25 top-10 actually contains at least
+        # one of its relevant docs — otherwise every metric below would
+        # be 0. (Queries that share no keywords with their relevant docs
+        # are great examples of where vector beats lexical, but they make a
+        # confusing first metric walkthrough.)
+        def has_bm25_hit(qid):
+            q_qrels = qrels.get(qid, {})
+            rel_set = {did for did, s in q_qrels.items() if s > 0}
+            if not rel_set:
+                return False
+            ranked = text_only(coll, queries[qid], top_k=10)
+            return any(r['doc_id'] in rel_set for r in ranked)
+
+        sample_qid    = next(qid for qid in queries if has_bm25_hit(qid))
         sample_query  = queries[sample_qid]
         sample_qrels  = qrels.get(sample_qid, {})
         relevant_docs = {did: s for did, s in sample_qrels.items() if s > 0}

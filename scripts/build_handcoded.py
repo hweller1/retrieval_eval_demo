@@ -471,7 +471,29 @@ def nb01() -> list[dict]:
         Pull one query and look at it:
         """),
         code("""
-        sample_qid    = next(iter(queries))
+        # We want a worked-example query where BM25 actually retrieves at
+        # least one relevant doc in the top 10 — otherwise the metric demo
+        # below would be all zeros. (Some queries share no keywords with
+        # their relevant docs; BM25 can't bridge that gap. Those are great
+        # examples of where vector search wins, which we'll see in Lab 2.)
+        def has_top_10_hit(qid):
+            q_qrels = qrels.get(qid, {})
+            rel_set = {did for did, s in q_qrels.items() if s > 0}
+            if not rel_set:
+                return False
+            pipeline = [
+                {"$search": {"index": TEXT_INDEX_NAME,
+                              "text": {"path": "text", "query": queries[qid]}}},
+                {"$limit": 40},
+            ]
+            seen_docs = set()
+            for row in coll.aggregate(pipeline):
+                seen_docs.add(row['doc_id'])
+                if len(seen_docs) >= 10:
+                    break
+            return bool(seen_docs & rel_set)
+
+        sample_qid    = next(qid for qid in queries if has_top_10_hit(qid))
         sample_query  = queries[sample_qid]
         sample_qrels  = qrels.get(sample_qid, {})
         relevant_docs = {did: s for did, s in sample_qrels.items() if s > 0}
