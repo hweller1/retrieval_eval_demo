@@ -24,11 +24,13 @@ Assumes the dataset's collection has already been ingested.
 
 from __future__ import annotations
 
-import sys
+import os, sys
 import time
 import argparse
 
-sys.path.insert(0, ".")
+_HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, os.path.dirname(os.path.dirname(_HERE)))  # repo root
+sys.path.insert(0, os.path.dirname(_HERE))                    # phase4/
 
 import query as query_mod
 import query_classifier as qc

@@ -19,4 +19,7 @@ judge_cache.json
 judge_cache.json.bak
 judge_cache.json.tmp
 
+# Learner-generated custom eval sets from Lab 3 (regenerated on demand)
+/eval_sets/
+
 /tmp/

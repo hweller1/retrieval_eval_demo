@@ -98,8 +98,8 @@ def ndcg_at_k(ranked: list[str], relevant: set[str] | Mapping[str, int], k: int)
 
 # ── Aggregator ────────────────────────────────────────────────────────────────
 
-# The metric configuration the demo reports. Keep this list as the single
-# source of truth so query.py and test_harness.py stay in sync.
+# The metric configuration the lab reports. Single source of truth so
+# notebooks and the phase4 CLIs stay in sync.
 METRIC_KS = (5, 10)
 
 

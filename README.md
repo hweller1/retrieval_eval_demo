@@ -1,288 +1,139 @@
-# voyage-context-3 × MongoDB Atlas Vector Search
+# Retrieval evaluation — hands-on lab
 
-A demo of [`voyage-context-3`](https://www.mongodb.com/docs/voyageai/models/contextualized-chunk-embeddings/),
-Voyage AI's contextualized chunk-embedding model, running entirely through
-the **MongoDB-hosted Voyage AI endpoint**. Documents are split with a
-semantic-boundary-aware recursive splitter, embedded with full-document
-context, ingested into MongoDB Atlas, and retrieved via `$vectorSearch`.
-Quality is measured against official **BEIR** relevance judgments.
+A four-notebook lab on **information retrieval evaluation**, designed as
+a companion to a course covering:
+
+- **Lesson 1** — *What is retrieval evaluation?*
+- **Lesson 2** — *Retrieval evaluation metrics* (Precision, Recall, NDCG, MRR)
+- **Lesson 3** — *Understanding evaluation datasets* (queries, documents, qrels)
+- **Lesson 4** — *Retrieval evaluation walkthrough* (lexical vs vector vs hybrid)
+
+You'll measure a black-box retriever on a public BEIR benchmark, swap
+the black box for vector and hybrid search, then curate your own
+domain-specific evaluation set with an LLM bootstrap and human review.
+
+Under the hood the lab uses **MongoDB Atlas Vector Search** with Voyage
+AI's **`voyage-context-3`** contextualized chunk embeddings, accessed
+through the MongoDB-hosted Voyage endpoint.
+
+## Two tracks — pick the one that fits
+
+This repo ships the lab in two parallel forms:
+
+| Track | Folder | For | Style |
+|---|---|---|---|
+| **Hand-coded** *(default)* | `notebooks/` | Human learners stepping through the material | Inline MQL aggregation pipelines, inline metric formulas, MongoDB-quickstart-style numbered steps |
+| **Agent-assisted** | `agent-notebooks/` | Users working with a coding agent (Claude Code, Cursor, etc.) | Library-driven, terser cells, narrative-heavy markdown — assumes you'll ask the agent when you want to see what `text_only(coll, q)` is actually doing |
+
+Both tracks teach the same four labs in the same order:
 
 ```
-BEIR dataset → recursive split → /v1/contextualizedembeddings → MongoDB → $vectorSearch
+00_setup_and_ingest.ipynb      pick a BEIR dataset, ingest into Atlas, build indexes
+01_evaluate_blackbox.ipynb     Lessons 1+2 — measure BM25 with P@k / R@k / NDCG@k / MRR
+02_swap_blackbox.ipynb         Lesson 4   — swap to $vectorSearch, then $rankFusion hybrid
+03_curate_eval_set.ipynb       Lesson 3   — LLM-draft queries+labels, curate, re-evaluate
 ```
 
-## What you need
+The hand-coded track is the default. If you're using a coding agent,
+also read **`AGENTS.md`** before starting — it's the working manual for
+that track.
 
-Both credentials come from a single MongoDB Atlas account — **no separate
-Voyage AI account required**.
+## Setup
 
-| Variable | Where to get it | Required for |
+You need a free MongoDB Atlas account with the Voyage AI add-on
+enabled. Both credentials come from Atlas — no separate Voyage AI
+account required.
+
+| Variable | Where to get it | Used in |
 |---|---|---|
-| `VOYAGE_API_KEY` | Atlas UI → your project → **AI Models** → **API Keys** → "Create API Key". The key starts with `al-`. | All retrieval modes |
-| `MONGODB_URI` | Atlas UI → **Database** → "Connect" → "Drivers" → copy the `mongodb+srv://...` connection string and substitute your DB user's password. | All retrieval modes |
-| `OPENAI_API_KEY` | platform.openai.com → API Keys. | Optional — only needed for LLM-driven query rewriters (`hyde`, `multi`, `decompose`). |
+| `VOYAGE_API_KEY` | Atlas → AI Models → API Keys → "Create API Key" (starts with `al-`) | Labs 0, 2, 3 |
+| `MONGODB_URI`    | Atlas → Database → Connect → Drivers — copy the `mongodb+srv://...` string with your DB user's password | all labs |
+| `OPENAI_API_KEY` | platform.openai.com → API Keys                                                                            | Lab 3 only |
 
-All three go in `.env`:
+Drop them in `.env` at the repo root:
 
 ```bash
 VOYAGE_API_KEY=al-...
 MONGODB_URI=mongodb+srv://<user>:<password>@<cluster>.mongodb.net/?retryWrites=true&w=majority
-OPENAI_API_KEY=sk-...   # optional
+OPENAI_API_KEY=sk-...   # only for Lab 3
 ```
 
-> **Atlas prerequisites**
-> - A cluster (M0 free tier works fine)
-> - A database user with read/write access on `voyage_context_demo` (or admin)
-> - Your IP allowlisted under **Network Access** (or `0.0.0.0/0` for testing)
-> - The Voyage AI add-on enabled for the project so `AI Models` appears in the sidebar
+Atlas prerequisites:
 
-## Install
+- A cluster (M0 free tier is fine for `scifact` / `nfcorpus`)
+- A DB user with read/write on `voyage_context_demo`
+- Your IP allowlisted (or `0.0.0.0/0` for testing)
+- The **Voyage AI add-on** enabled so `AI Models` appears in the Atlas sidebar
+
+Install the Python deps:
 
 ```bash
-pip3 install voyageai pymongo python-dotenv requests beir
-# On macOS with brew-managed Python you may need:
-#   pip3 install --break-system-packages ...
+pip3 install --break-system-packages \
+    pymongo voyageai beir python-dotenv requests \
+    openai pandas matplotlib nbformat tqdm notebook
 ```
 
-## Layout
+## Run the lab
 
-```
-voyage-demos/
-├── .env              # VOYAGE_API_KEY, MONGODB_URI
-├── lib.py            # shared: dataset registry, splitter, embedding helpers
-├── ingest.py         # CLI: ingest a BEIR dataset into MongoDB
-├── query.py          # CLI: run queries against an ingested dataset
-├── test_harness.py   # validates ingest + query for every dataset
-├── README.md
-└── CLAUDE.md         # working notes for AI agents
-```
-
-The two scripts are independently runnable and share their dataset
-registry, splitter, and embedding helpers via `lib.py`.
-
-## Usage
-
-### See available datasets
+Open the track you picked:
 
 ```bash
-python3 ingest.py --list      # or:  python3 query.py --list
+# Hand-coded (default)
+jupyter notebook notebooks/
+
+# Agent-assisted
+jupyter notebook agent-notebooks/
 ```
 
-```
-Supported BEIR datasets
+Work through them in order. Lab 0 takes ~30–90 s (depends on the
+dataset sample size); Labs 1–2 take a few seconds each; Lab 3 takes
+~1–2 minutes (LLM calls).
 
-  touche2020   Argument retrieval — controversial debate topics (49 queries / 382k docs)
-  scifact      Scientific claim verification (300 queries / 5.2k abstracts)
-  fiqa         Financial Q&A — long-form opinionated answers (648 queries / 57k docs)
-  nfcorpus     Medical literature retrieval (323 queries / 3.6k docs)
-  arguana      Counter-argument retrieval (1.4k queries / 8.7k arguments)
-  trec-covid   COVID-19 research retrieval (50 queries / 171k docs)
-  scidocs      Scientific paper retrieval (1k queries / 25k docs)
-  quora        Duplicate question retrieval (10k queries / 523k docs)
-```
+## Supported BEIR datasets
 
-### Ingest a dataset
+| name | description |
+|---|---|
+| `scifact`    | scientific claim verification (300 queries / 5.2k abstracts) — **recommended for first run** |
+| `nfcorpus`   | medical literature retrieval (323 queries / 3.6k docs) |
+| `fiqa`       | financial Q&A — opinionated long answers (648 queries / 57k docs) |
+| `arguana`    | counter-argument retrieval (1.4k queries / 8.7k arguments) |
+| `scidocs`    | scientific paper retrieval (1k queries / 25k docs) |
+| `trec-covid` | COVID-19 research retrieval (50 queries / 171k docs) |
+| `touche2020` | controversial-topic argument retrieval (49 queries / 382k docs) |
+| `quora`      | duplicate-question retrieval (10k queries / 523k docs) |
 
-```bash
-python3 ingest.py touche2020              # default sample: 2000 docs
-python3 ingest.py scifact --sample 500    # smaller for fast iteration
-```
+After the lab, advanced material — per-query routing, query
+rewriters, cross-encoder reranking, LLM-as-a-judge evaluation, and
+multi-dataset benchmark sweeps — lives in **`phase4/`**. See
+`phase4/README.md`.
 
-This step:
-1. Downloads the BEIR archive (cached in `/tmp/beir_datasets/`).
-2. Splits each document with a recursive character text splitter that
-   respects paragraph → line → sentence → word boundaries.
-3. Embeds chunks via `POST https://ai.mongodb.com/v1/contextualizedembeddings`
-   — each chunk is embedded together with its full parent document, so
-   the resulting vector captures full-document context.
-4. Inserts chunks + embeddings into `voyage_context_demo.chunks_<dataset>`.
-5. Creates a vector search index named `voyage_vector_index` (cosine,
-   1024 dimensions) and waits for it to become queryable.
-
-The collection is dropped and rebuilt on every ingest of the same dataset.
-Different datasets coexist in their own collections.
-
-### Run queries
-
-```bash
-python3 query.py touche2020                       # default mode: hybrid
-python3 query.py scifact --mode vector            # pure vector search
-python3 query.py scifact --mode text              # pure $search (BM25)
-python3 query.py scifact --mode hybrid            # RRF over vector + text
-python3 query.py scifact --num-queries 20
-```
-
-**Three retrieval modes** are available, all backed by the same indexed
-collection:
-
-| Mode | Backend | When it wins |
-|---|---|---|
-| `vector` | `$vectorSearch` over voyage-context-3 embeddings | Semantic / paraphrased queries; long-context preservation |
-| `text` | `$search` (Atlas Search, BM25) over chunk text | Exact strings, codes, named entities, abbreviations |
-| `hybrid` | RRF (k=60) over vector + text rankings | Real-world workloads — typically best on average |
-
-`ingest.py` builds **both** indexes per dataset, so all three modes
-are available without re-ingesting.
-
-**Four query rewriters** can be layered on top of any mode (`--rewriter`):
-
-| Rewriter | What the LLM does | When it helps |
-|---|---|---|
-| `none` | passthrough — no LLM call | always available; the baseline |
-| `hyde` | drafts a hypothetical passage that would answer the query, embed that instead | short / abstract queries where vector embedding of the raw query underspecifies the search |
-| `multi` | produces 3 paraphrases of the query; results from all 4 are RRF-fused | vocabulary mismatch between query and corpus |
-| `decompose` | breaks a complex query into 2-4 sub-questions; each retrieves separately and gets fused | multi-hop or compound questions |
-
-```bash
-python3 query.py touche2020 --mode hybrid --rewriter hyde
-python3 query.py scifact --rewriter multi --num-queries 10
-```
-
-All rewriters except `none` require `OPENAI_API_KEY`.
-
-**Reranking** adds a cross-encoder second stage on top of any retrieval
-mode (`--rerank`). The first stage fetches 50 candidates; `rerank-2.5`
-then scores each `(query, candidate)` pair as a cross-encoder and
-returns the top 10.
-
-```bash
-python3 query.py scifact --mode hybrid --rerank
-```
-
-**Dynamic strategy routing** — instead of fixing alpha / rewriter /
-rerank up front, let a cheap LLM (`gpt-4o-mini`) decide all three
-per query based on the query's characteristics:
-
-```bash
-python3 query.py touche2020 --strategy dynamic
-```
-
-The classifier looks at the query alone (no dataset hints) and picks:
-- **α** in [0, 1] for hybrid fusion weight,
-- **rewriter** (`none` / `hyde` / `multi` / `decompose`),
-- **rerank** on/off.
-
-On homogeneous BEIR datasets the classifier picks the same strategy for
-almost every query (because the queries within a dataset are similar).
-On a heterogeneous query stream, the routing varies meaningfully:
+## Repo layout (one screen)
 
 ```
-α=0.15                       CVE-2021-44228               (exact ID, BM25 dominates)
-α=0.55 +hyde +rerank         vaping                        (single word, expand it)
-α=0.75 +decompose            How does microbiome affect mood and is it different in vegans?
-α=0.80                       Should the death penalty be abolished?
+voyage-context-3-testing/
+├── README.md             # this file
+├── AGENTS.md             # working manual for the agent track
+├── CLAUDE.md             # working knowledge for Claude Code sessions
+├── lib.py                # dataset registry, splitter, embedding helpers
+├── lib_metrics.py        # P@k, R@k, NDCG@k, MRR, AP/MAP
+├── retrieve.py           # vector / text / hybrid wrappers
+├── ingest.py             # BEIR → chunks → embeddings → MongoDB + indexes
+├── notebooks/            # HAND-CODED lab (default)
+├── agent-notebooks/      # AGENT-FRIENDLY lab
+├── scripts/              # notebook builders (single source of truth)
+└── phase4/               # advanced / after-the-lab material
 ```
 
-Empirically (`--sample 500 --num-queries 10`):
-
-| Strategy | scifact | nfcorpus | touche2020 |
-|---|---|---|---|
-| vector              | 0.874 | **0.781** | 0.913 |
-| hybrid α=0.5 (naïve RRF) | 0.833 | 0.662 | 0.941 |
-| hybrid α=0.8 (manual tune) | 0.872 | 0.745 | **0.946** |
-| **dynamic (per-query)** | **0.872** | 0.726 | 0.944 |
-
-The "broken" naïve hybrid was just badly weighted — uniform α=0.5 dragged
-in BM25 noise. Dynamic per-query routing matches manually-tuned α=0.8
-within ~0.02 NDCG@10 on all three datasets, with no per-dataset config.
-The dynamic layer's real value is on production query streams that mix
-exact-string lookups, conceptual questions, and multi-hop queries — BEIR
-itself can't exercise this because its queries are homogeneous within
-each dataset.
-
-Each mode returns results deduplicated to one chunk per parent document
-and scores them against the official qrels.
-
-Output for each query shows:
-- The query text
-- Number of relevant docs in the ingested sample
-- Per-query metrics: **P@5, R@5, NDCG@5, MRR, AP**
-- The top-5 retrieved docs marked `[✓]` if relevant, with snippets
-
-A summary block at the end reports the aggregate **P@5, R@5, NDCG@5,
-NDCG@10, MRR, MAP** across all queries.
-
-## Test harness
-
-`test_harness.py` validates the full pipeline against every supported
-dataset. It runs `ingest` then `query` for each, checks MongoDB state,
-parses the metrics, and prints a pass/fail table.
-
-```bash
-python3 test_harness.py --quick                       # 3 small datasets, all 3 modes
-python3 test_harness.py                                # all 8 datasets, all 3 modes
-python3 test_harness.py --datasets scifact fiqa        # specific datasets
-python3 test_harness.py --modes vector hybrid          # subset of modes
-python3 test_harness.py --rewriters none hyde multi    # compare rewriters
-python3 test_harness.py --quick --report report.md     # markdown comparison
-```
-
-The harness runs every `dataset × mode × rewriter` combination, ingesting
-once per dataset, then prints a Δ-vs-baseline table and per-metric ASCII
-bar charts. By default `--rewriters` is just `none`, preserving the pure
-mode comparison; pass multiple rewriters to add the rewriting axis.
-
-Output has three parts: a per-dataset summary table, ASCII bar charts
-comparing each metric across datasets, and an optional Markdown file
-suitable for sharing or pasting into a PR description.
-
-```
-Dataset         Ingest   Query   Chunks      P@5      R@5   NDCG@5  NDCG@10      MRR      MAP  Status
-────────────── ─────── ─────── ──────── ──────── ──────── ──────── ──────── ──────── ────────  ──────
-scifact          38.4s    5.2s      309    0.200    1.000    0.833    0.833    0.778    0.778  PASS
-nfcorpus         35.3s    1.8s      296    1.000    0.144    0.914    0.879    1.000    0.410  PASS
-arguana          34.9s    2.4s      123    0.200    1.000    0.877    0.877    0.833    0.833  PASS
-
-3/3 datasets passed
-```
-
-```
-NDCG@10
-  scifact   ████████████████████      0.833
-  nfcorpus  █████████████████████▏    0.879
-  arguana   █████████████████████     0.877
-
-MAP
-  scifact   ██████████████████▋       0.778
-  nfcorpus  █████████▉                0.410
-  arguana   ████████████████████      0.833
-…
-```
-
-The harness exits non-zero if any dataset fails, so it's CI-friendly.
-
-## How it differs from a standard RAG ingestion
-
-| | Standard chunked embeddings | voyage-context-3 |
-|---|---|---|
-| Endpoint | `POST /v1/embeddings` | `POST /v1/contextualizedembeddings` |
-| Input shape | `["chunk1", "chunk2", ...]` | `[[full_doc, chunk1, chunk2], ...]` |
-| Per-chunk context | None — each chunk is embedded in isolation | Each chunk is embedded with awareness of the entire parent document |
-| Best for | Short, self-contained passages | Long documents where chunks lose meaning when extracted (debate arguments, legal text, scientific abstracts) |
-
-Same downstream workflow — the resulting vectors plug into MongoDB Vector
-Search like any other 1024-dimensional embedding.
+The `.ipynb` files are **generated** from `scripts/build_handcoded.py`
+and `scripts/build_agent.py`. Edit the builders, then rerun them — don't
+hand-edit the JSON.
 
 ## Troubleshooting
 
-**`Authentication failed` (MongoDB)** — your `MONGODB_URI` credentials are
-wrong or the password isn't URL-encoded. Special chars like `@`, `#`, `:`
-must be percent-encoded (e.g. `@` → `%40`).
-
-**`Model voyage-context-3 is not supported`** — you're hitting the standard
-embeddings endpoint. The model only works on `/v1/contextualizedembeddings`.
-The scripts handle this correctly — make sure you're not calling it
-yourself via `voyage.embed(model="voyage-context-3", ...)`.
-
-**Index never becomes queryable** — Atlas vector indexes can take 30–60s
-on a fresh collection. The script waits up to 150s; if it gives up you
-can re-run `query.py` later when the index is ready (check Atlas UI).
-
-**`Collection ... is empty`** — you ran `query.py` before `ingest.py`, or
-a previous ingest used a different collection name. Re-ingest.
-
-## License / attribution
-
-- BEIR datasets © their respective authors; this project loads them via
-  the [BEIR Python package](https://github.com/beir-cellar/beir).
-- voyage-context-3 is a Voyage AI model hosted by MongoDB.
+| Symptom | Likely cause |
+|---|---|
+| `Authentication failed` from Mongo | URI password contains unencoded special chars (`@` → `%40`) |
+| `Model voyage-context-3 is not supported` | You're hitting `/v1/embeddings` instead of `/v1/contextualizedembeddings` — use `lib.embed_contextualized()` |
+| `index not found` on first query after ingest | Atlas takes 30–60 s to make a new search index queryable. Wait, then re-run. |
+| Notebook can't import `lib` | Make sure the first cell's `sys.path.insert(...)` ran before the import. Jupyter must be started from the repo root or one level up. |
+| `KeyError` during ingest sample step | Old `lib.py`; the sample filter handles qrels referencing missing doc IDs (in e.g. `arguana`). Pull latest. |

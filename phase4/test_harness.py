@@ -38,6 +38,8 @@ import contextlib
 import traceback
 from dataclasses import dataclass, field
 
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 # Quiet down BEIR / tqdm noise so the harness output stays readable
 os.environ.setdefault("TQDM_DISABLE", "1")
 os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")

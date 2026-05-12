@@ -17,13 +17,15 @@ Usage:
 
 from __future__ import annotations
 
-import sys
+import os, sys
 import time
 import json
 import argparse
 import pathlib
 
-sys.path.insert(0, ".")
+_HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, os.path.dirname(os.path.dirname(_HERE)))  # repo root
+sys.path.insert(0, os.path.dirname(_HERE))                    # phase4/
 
 import voyageai
 import pymongo
@@ -45,7 +47,7 @@ TOP_K_RETRIEVE = 10            # how many top results per query/strategy to pool
 TOP_K_REPORT   = 10            # K for NDCG@K reporting
 RERANK_CANDIDATES = 50
 
-QRELS_OUT = pathlib.Path("data_loaders/sec_qrels.json")
+QRELS_OUT = pathlib.Path(_HERE).parent / "data_loaders" / "sec_qrels.json"
 
 
 # ── Strategy definitions ─────────────────────────────────────────────────────

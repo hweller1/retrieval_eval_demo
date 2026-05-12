@@ -1,11 +1,11 @@
 """
-Shared helpers for the voyage-context-3 demo scripts (ingest.py, query.py).
+Shared library for the retrieval evaluation lab.
 
 Contains constants, the BEIR dataset registry, the recursive character text
 splitter, the embedding helpers (contextualized for documents, standard for
 queries), the MongoDB collection-name convention, and the dataset listing
-command. The actual ingest/query pipelines live in their own scripts so each
-script is independently runnable.
+command. Used by `ingest.py`, by every notebook under `notebooks/`, and by
+the advanced material under `phase4/`.
 """
 
 from __future__ import annotations
@@ -91,7 +91,7 @@ DATASETS: dict[str, dict] = {
     # Non-BEIR datasets use a `loader_fn` instead of `url` + `folder`.
     # The loader returns (corpus, queries, qrels, info) just like BEIR.
     "sec-10k": {
-        "loader"     : "data_loaders.sec_10k:load",
+        "loader"     : "phase4.data_loaders.sec_10k:load",
         "split"      : "test",
         "description": "SEC 10-K filings — 15 US tech companies, FY2021-2024 (300 trader queries, no qrels — uses LLM judge)",
     },
@@ -385,8 +385,7 @@ def print_dataset_list() -> None:
     print()
     print("  Usage:")
     print("    python3 ingest.py <dataset> [--sample N]")
-    print("    python3 query.py  <dataset> [--mode vector|text|hybrid] "
-          "[--rewriter none|hyde|multi|decompose] [--num-queries N]")
+    print("    (then open notebooks/01_evaluate_blackbox.ipynb to evaluate)")
     print()
 
 

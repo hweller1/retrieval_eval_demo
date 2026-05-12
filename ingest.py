@@ -176,10 +176,9 @@ def ingest(dataset: str, corpus_sample: int | None = CORPUS_SAMPLE) -> None:
             print(f"  Some indexes still building — first query may be slow.")
 
     print()
-    print(f"  Ingest complete. Run queries with:")
-    print(f"      python3 query.py {dataset}                    # default mode: hybrid")
-    print(f"      python3 query.py {dataset} --mode vector")
-    print(f"      python3 query.py {dataset} --mode text")
+    print(f"  Ingest complete. Next:")
+    print(f"      jupyter notebook notebooks/01_evaluate_blackbox.ipynb")
+    print(f"      (or for the advanced CLI: python3 phase4/query.py {dataset})")
     print()
     mongo.close()
 

@@ -35,7 +35,7 @@ import llm_client
 
 
 JUDGE_MODEL = "gpt-4o-mini"
-JUDGE_CACHE_PATH = pathlib.Path("judge_cache.json")
+JUDGE_CACHE_PATH = pathlib.Path(__file__).parent / "judge_cache.json"
 GRADE_RANGE = (0, 3)
 
 

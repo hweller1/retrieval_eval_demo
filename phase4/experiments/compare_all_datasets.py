@@ -19,11 +19,13 @@ Usage:
 
 from __future__ import annotations
 
-import sys
+import os, sys
 import time
 import argparse
 
-sys.path.insert(0, ".")
+_HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, os.path.dirname(os.path.dirname(_HERE)))  # repo root for lib/retrieve/ingest
+sys.path.insert(0, os.path.dirname(_HERE))                    # phase4/ for sibling modules
 
 import pymongo
 import lib
