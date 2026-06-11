@@ -1,18 +1,15 @@
 """
-Build the four HAND-CODED lab notebooks under notebooks/.
+Build the four lab notebooks at the repo root.
 
-The hand-coded track is the default. It's written in the
-MongoDB quickstart style — short numbered steps, inline MQL
-aggregation pipelines ($vectorSearch / $search / $rankFusion), and
-inline metric formulas (Precision / Recall / NDCG / MRR shown as plain
-Python you can follow line-by-line). The only things we don't inline
-are the unglamorous helpers: the recursive text splitter (lib.split_text)
-and the contextualized embedding HTTP call (lib.embed_contextualized).
-
-The agent track (terser, library-driven) is built by build_agent.py.
+Written in the MongoDB quickstart style — short numbered steps, inline MQL
+aggregation pipelines ($vectorSearch / $search / $rankFusion), and inline
+metric formulas (Precision / Recall / NDCG / MRR shown as plain Python you
+can follow line-by-line). The only things we don't inline are the unglamorous
+helpers: the recursive text splitter (lib.split_text) and the contextualized
+embedding HTTP call (lib.embed_contextualized).
 
 Regenerate:
-    python3 scripts/build_handcoded.py
+    python3 src/scripts/build_handcoded.py
 """
 
 from __future__ import annotations
@@ -22,14 +19,17 @@ import pathlib
 from _nb_helpers import md, code, write
 
 
-NB_DIR = pathlib.Path(__file__).resolve().parent.parent / "notebooks"
+# Notebooks live at the repo root (two levels up from src/scripts/).
+NB_DIR = pathlib.Path(__file__).resolve().parent.parent.parent
 
 
 SETUP_CELL = """
 import os, sys
-_REPO_ROOT = os.path.abspath(os.path.join(os.getcwd(), ".."))
-if _REPO_ROOT not in sys.path:
-    sys.path.insert(0, _REPO_ROOT)
+# Notebooks live at the repo root; library modules live in src/.
+_REPO_ROOT = os.path.abspath(os.getcwd())
+_SRC = os.path.join(_REPO_ROOT, "src")
+if _SRC not in sys.path:
+    sys.path.insert(0, _SRC)
 """
 
 

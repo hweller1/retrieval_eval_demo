@@ -20,16 +20,10 @@ MongoDB-hosted Voyage endpoint.
 Work through them in order the first time. After that, each notebook is
 self-contained enough to revisit on its own.
 
-## Two tracks — pick the one that fits
-
-| Track | Folder | Pick this if… |
-|---|---|---|
-| **Hand-coded** *(default)* | `notebooks/` | You want to read every MQL pipeline and metric formula inline — MongoDB-quickstart style, nothing hidden |
-| **Agent-assisted** | `agent-notebooks/` | You're working with a coding agent (Claude Code, Cursor, etc.) and prefer short cells with narrative markdown — ask the agent when you want to see what a library call does under the hood |
-
-Both tracks cover the same four notebooks in the same order.
-If you're using a coding agent, also read **`AGENTS.md`** — it's the working
-manual for that track.
+The four notebooks live at the repo root. If you're working with a coding
+agent (Claude Code, Cursor, etc.), also read **`AGENTS.md`** — it covers how
+to navigate the library code in `src/` when you want to see what a helper
+function does under the hood.
 
 ## Setup
 
@@ -69,11 +63,7 @@ pip3 install --break-system-packages \
 ## Run the lab
 
 ```bash
-# Hand-coded (default)
-jupyter notebook notebooks/
-
-# Agent-assisted
-jupyter notebook agent-notebooks/
+jupyter notebook .
 ```
 
 Lab 0 takes ~30–90 s depending on dataset sample size. Labs 1–2 take a few
@@ -144,22 +134,24 @@ multi-dataset benchmark sweeps. See `phase4/README.md`.
 
 ```
 voyage-context-3-testing/
-├── README.md             # this file
-├── AGENTS.md             # working manual for the agent track
-├── CLAUDE.md             # working knowledge for Claude Code sessions
-├── lib.py                # dataset registry, splitter, embedding helpers
-├── lib_metrics.py        # P@k, R@k, NDCG@k, MRR, AP/MAP
-├── retrieve.py           # vector / text / hybrid wrappers
-├── ingest.py             # BEIR → chunks → embeddings → MongoDB + indexes
-├── notebooks/            # HAND-CODED lab (default)
-├── agent-notebooks/      # AGENT-FRIENDLY lab
-├── scripts/              # notebook builders (single source of truth)
-└── phase4/               # advanced / after-the-lab material
+├── README.md
+├── AGENTS.md                      # working manual for coding-agent users
+├── CLAUDE.md                      # working knowledge for Claude Code sessions
+├── 00_setup_and_ingest.ipynb
+├── 01_evaluate_blackbox.ipynb
+├── 02_swap_blackbox.ipynb
+├── 03_curate_eval_set.ipynb
+└── src/
+    ├── lib.py                     # dataset registry, splitter, embedding helpers
+    ├── lib_metrics.py             # P@k, R@k, NDCG@k, MRR, AP/MAP
+    ├── retrieve.py                # vector / text / hybrid wrappers
+    ├── ingest.py                  # BEIR → chunks → embeddings → MongoDB + indexes
+    ├── scripts/                   # notebook builders (single source of truth)
+    └── phase4/                    # advanced / after-the-lab material
 ```
 
-The `.ipynb` files are **generated** from `scripts/build_handcoded.py` and
-`scripts/build_agent.py`. Edit the builders, then rerun them — don't hand-edit
-the JSON.
+The `.ipynb` files are **generated** by `src/scripts/build_handcoded.py`.
+Edit the builder, then rerun it — don't hand-edit the JSON.
 
 ## Troubleshooting
 

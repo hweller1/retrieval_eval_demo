@@ -20,21 +20,21 @@ import pathlib
 from _nb_helpers import md, code, write
 
 
-NB_DIR = pathlib.Path(__file__).resolve().parent.parent / "agent-notebooks"
+NB_DIR = pathlib.Path(__file__).resolve().parent.parent.parent
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Shared setup snippet — adds repo root to sys.path so notebooks import
-# lib.py / retrieve.py / lib_metrics.py / ingest.py from one level up.
+# Shared setup snippet — adds src/ to sys.path so notebooks can import
+# lib.py / retrieve.py / lib_metrics.py / ingest.py from src/.
 # ─────────────────────────────────────────────────────────────────────────────
 
 SETUP_CELL = """
 import os, sys
-# Notebooks live in agent-notebooks/. Add the repo root to the path so
-# we can import the lab's library modules.
-_REPO_ROOT = os.path.abspath(os.path.join(os.getcwd(), ".."))
-if _REPO_ROOT not in sys.path:
-    sys.path.insert(0, _REPO_ROOT)
+# Notebooks live at the repo root; library modules live in src/.
+_REPO_ROOT = os.path.abspath(os.getcwd())
+_SRC = os.path.join(_REPO_ROOT, "src")
+if _SRC not in sys.path:
+    sys.path.insert(0, _SRC)
 """
 
 

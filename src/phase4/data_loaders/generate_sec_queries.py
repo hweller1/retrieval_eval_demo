@@ -39,7 +39,9 @@ import json
 import argparse
 import pathlib
 
-sys.path.insert(0, ".")
+_PHASE4 = str(pathlib.Path(__file__).resolve().parent.parent)
+if _PHASE4 not in sys.path:
+    sys.path.insert(0, _PHASE4)
 
 import llm_client
 from data_loaders.sec_10k import COMPANIES
