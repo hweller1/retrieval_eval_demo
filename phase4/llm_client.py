@@ -15,7 +15,14 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-# Default model is the cheapest 4o-class model. Override per call when needed.
+# Default judge model — gpt-4o-mini is a solid general-purpose choice.
+# For domain-specific or nuanced relevance judgements (legal, medical, graded
+# relevance) a stronger model may produce more reliable grades. See the
+# "Choosing the right judge model" section in README.md for a prompt you can
+# use to get a tailored recommendation; then set DEFAULT_MODEL to the result.
+#
+# To swap providers, also pass base_url="https://<provider>/v1" to OpenAI()
+# below. Any OpenAI-compatible API works; set OPENAI_API_KEY accordingly.
 DEFAULT_MODEL = "gpt-4o-mini"
 
 _client_lock = threading.Lock()

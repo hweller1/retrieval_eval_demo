@@ -186,7 +186,14 @@ pip3 install --break-system-packages \
     openai pandas matplotlib nbformat tqdm
 
 # 2. Create .env at the repo root (see README.md for what each var is)
-#    VOYAGE_API_KEY, MONGODB_URI, OPENAI_API_KEY (last one optional)
+#    VOYAGE_API_KEY, MONGODB_URI, OPENAI_API_KEY (last one optional, Lab 3 only)
+#
+#    The default judge model is gpt-4o-mini (set in phase4/llm_client.py).
+#    If the user's retrieval problem is domain-specific or uses graded relevance,
+#    a stronger model will give better grades. See "Choosing the right judge model"
+#    in README.md — it includes a prompt the user can run to get a recommendation
+#    tailored to their application goal and data model. Once they have a model name,
+#    they only need to update DEFAULT_MODEL in phase4/llm_client.py.
 
 # 3. Verify the repo imports cleanly
 python3 -c "import lib, retrieve, lib_metrics, ingest; print('OK')"
